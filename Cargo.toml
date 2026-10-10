@@ -1,0 +1,27 @@
+[package]
+name = "linaux-screen"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Turn a phone or tablet into a second monitor for KDE Plasma over the browser"
+repository = "https://github.com/janders1993/Linaux-Screen"
+
+[dependencies]
+anyhow = "1"
+ashpd = { version = "0.13", features = ["screencast"] }
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+futures = "0.3"
+gst = { package = "gstreamer", version = "0.25" }
+gst-sdp = { package = "gstreamer-sdp", version = "0.25" }
+gst-webrtc = { package = "gstreamer-webrtc", version = "0.25" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+strip = true

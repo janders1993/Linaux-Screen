@@ -4,7 +4,7 @@ Turn any phone or tablet into a second monitor for your Linux desktop — no app
 
 The desktop runs a small service. Your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extended (or mirrored) display with touch, pen, keyboard and audio.
 
-> **Status:** early planning. Nothing works yet — see the [roadmap](#roadmap) and the issues.
+> **Status:** spike (issue #1). Streaming to a browser works end to end with a test pattern; capturing a real KDE virtual monitor still needs testing on a Plasma desktop.
 
 ## Goals
 
@@ -57,9 +57,58 @@ The desktop runs a small service. Your iPad, iPhone or Android device opens `htt
 
 Each step is tracked as a GitHub issue.
 
-## Building
+## Building and running (spike)
 
-Not yet. Instructions arrive with the spike.
+Bazzite is immutable, so build inside a Fedora distrobox (matching Bazzite's Fedora version), then run the binary on the host. Running on the host means you get Bazzite's GStreamer, including its hardware H.264 encoders, which plain Fedora leaves out.
+
+**Build** (once, and after each `git pull`):
+
+```bash
+distrobox create --name linaux --image registry.fedoraproject.org/fedora:$(rpm -E %fedora)
+distrobox enter linaux
+
+sudo dnf install -y gcc pkgconf-pkg-config dbus-devel \
+  gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-bad-free-devel
+curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y && source ~/.cargo/env
+
+git clone https://github.com/janders1993/Linaux-Screen ~/Linaux-Screen
+cd ~/Linaux-Screen && cargo build --release
+exit
+```
+
+**Check the host has the runtime pieces** (in a normal Bazzite terminal):
+
+```bash
+gst-inspect-1.0 webrtcbin nicesrc pipewiresrc dtlsenc srtpenc vah264enc nvh264enc x264enc 2>&1 | grep -E "^(Factory Details|No such element)" -A0
+```
+
+You need `webrtcbin`, `nicesrc`, `pipewiresrc`, `dtlsenc` and `srtpenc`, plus at least one encoder (`vah264enc` on AMD/Intel, `nvh264enc` on NVIDIA, or `x264enc`). If any are missing, open an issue with the output.
+
+**Run** (on the host):
+
+```bash
+~/Linaux-Screen/target/release/linaux-screen
+```
+
+It prints a URL such as `http://192.168.1.20:4444`. Open it on your phone or tablet on the same Wi-Fi. KDE asks once to allow screen sharing, then a new monitor appears in **System Settings → Display**. Arrange it and set its resolution there.
+
+Options:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--source virtual\|monitor\|test` | `virtual` | New extended monitor, mirror an existing one, or a test pattern (no capture) |
+| `--encoder auto\|vaapi\|nvenc\|x264` | `auto` | H.264 encoder; `auto` tries VA-API, NVENC, then software |
+| `--bitrate <kbps>` | `8000` | Video bitrate |
+| `--port <n>` | `4444` | Port to serve on |
+
+On the device: tap with **three fingers** (or press `s`) to show stats — resolution, fps, bitrate, buffer and decode time. On Android a tap goes fullscreen; on iPhone use **Share → Add to Home Screen**.
+
+**Troubleshooting**
+
+- Check which GStreamer pieces you have: `gst-inspect-1.0 webrtcbin nicesrc pipewiresrc vah264enc nvh264enc x264enc`
+- If something fails, run with `RUST_LOG=debug GST_DEBUG=3 cargo run --release` and attach the output to an issue.
+- If the network path is in doubt, `--source test` streams a moving test pattern with no screen capture involved.
+- Firewall: allow TCP 4444 and UDP (WebRTC picks random high ports), e.g. `sudo firewall-cmd --add-port=4444/tcp --add-port=1024-65535/udp` for a quick test.
 
 ## Bazzite notes
 
