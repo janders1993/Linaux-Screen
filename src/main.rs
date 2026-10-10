@@ -87,7 +87,15 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     gst::init()?;
 
-    let (encoder_name, encoder_desc) = stream::encoder(args.encoder, args.bitrate)?;
+    let (mut encoder_name, mut encoder_desc) = stream::encoder(args.encoder, args.bitrate)?;
+    // Debug: LINAUX_ENCODER replaces the encoder element and its settings,
+    // e.g. LINAUX_ENCODER="nvh264enc" to try driver defaults.
+    if let Ok(custom) = std::env::var("LINAUX_ENCODER") {
+        if !custom.trim().is_empty() {
+            encoder_name = custom.split_whitespace().next().unwrap_or_default().to_owned();
+            encoder_desc = custom;
+        }
+    }
     tracing::info!("using encoder {encoder_name}");
 
     // Held until exit: dropping it ends the screencast and removes the
