@@ -17,6 +17,7 @@ struct Screen {
 
 #[derive(Debug, Deserialize)]
 struct Output {
+    id: serde_json::Value,
     name: String,
     #[serde(default)]
     modes: Vec<Mode>,
@@ -53,6 +54,13 @@ pub async fn output_names() -> Result<Vec<String>> {
     Ok(screen().await?.outputs.into_iter().map(|o| o.name).collect())
 }
 
+fn json_id(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Runs kscreen-doctor and returns its combined output.
 async fn kscreen_output(args: &[String]) -> Result<String> {
     tracing::debug!("kscreen-doctor {}", args.join(" "));
@@ -62,7 +70,9 @@ async fn kscreen_output(args: &[String]) -> Result<String> {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    if !out.status.success() {
+    // kscreen-doctor exits 0 even when it can't find the output, so check
+    // what it said too.
+    if !out.status.success() || text.contains("not found") {
         bail!("kscreen-doctor {} failed: {}", args.join(" "), text.trim());
     }
     Ok(text)
@@ -75,6 +85,10 @@ async fn kscreen(args: &[String]) -> Result<()> {
 /// Our virtual monitor, as kscreen-doctor knows it.
 pub struct VirtualDisplay {
     name: String,
+    /// kscreen-doctor's numeric id for the output. Commands must use this:
+    /// kscreen-doctor splits arguments on dots, and KDE's virtual monitor
+    /// names contain dots (`Virtual-virtual-xdp-kde-org.kde.konsole`).
+    id: String,
 }
 
 impl VirtualDisplay {
@@ -87,7 +101,15 @@ impl VirtualDisplay {
             match new.as_slice() {
                 [name] => {
                     tracing::info!("virtual monitor is output {name}");
-                    return Ok(Self { name: name.clone() });
+                    let id = screen()
+                        .await?
+                        .outputs
+                        .into_iter()
+                        .find(|o| &o.name == name)
+                        .map(|o| json_id(&o.id))
+                        .ok_or_else(|| anyhow!("output {name} vanished"))?;
+                    tracing::info!("virtual monitor has kscreen id {id}");
+                    return Ok(Self { name: name.clone(), id });
                 }
                 [] => tokio::time::sleep(Duration::from_millis(100)).await,
                 many => bail!("several new outputs appeared ({many:?}); not sure which is ours"),
@@ -99,7 +121,7 @@ impl VirtualDisplay {
     /// Sets the monitor to `width`×`height` pixels at 60 Hz, scaled by
     /// `scale`.
     pub async fn apply(&self, width: u32, height: u32, scale: f64) -> Result<()> {
-        let name = &self.name;
+        let name = &self.id;
         let mut mode = self.find_mode(width, height).await?;
         if mode.is_none() {
             let out = kscreen_output(&[format!(
@@ -162,10 +184,7 @@ impl VirtualDisplay {
                 .abs()
                 .total_cmp(&(b.refresh_rate - 60.0).abs())
         });
-        Ok(matching.into_iter().next().map(|m| match m.id {
-            serde_json::Value::String(s) => s,
-            other => other.to_string(),
-        }))
+        Ok(matching.into_iter().next().map(|m| json_id(&m.id)))
     }
 }
 
@@ -214,10 +233,12 @@ mod tests {
 
     #[test]
     fn parses_kscreen_json() {
-        let json = r#"{"outputs":[{"name":"Virtual-1","enabled":true,
+        let json = r#"{"outputs":[{"id":1,"name":"Virtual-virtual-xdp-kde-org.kde.konsole","enabled":true,
             "modes":[{"id":"1","name":"1920x1080@60","refreshRate":60.0,
             "size":{"width":1920,"height":1080}}]}]}"#;
         let s: Screen = serde_json::from_str(json).unwrap();
         assert_eq!(s.outputs[0].modes[0].size.width, 1920);
+        assert_eq!(json_id(&s.outputs[0].id), "1");
+        assert_eq!(json_id(&s.outputs[0].modes[0].id), "1");
     }
 }
