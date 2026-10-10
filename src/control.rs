@@ -59,7 +59,10 @@ impl Control {
     /// Registers a connected device; it's unregistered when the guard drops.
     pub fn viewer_connected(&self, peer: SocketAddr) -> ViewerGuard<'_> {
         self.viewers.send_modify(|v| v.push(peer));
-        ViewerGuard { control: self, peer }
+        ViewerGuard {
+            control: self,
+            peer,
+        }
     }
 }
 
@@ -94,7 +97,10 @@ pub async fn run_auto_stop(control: &Control, timeout: Duration) {
         } else if had_viewer {
             let deadline = Instant::now() + timeout;
             control.countdown.send_replace(Some(deadline));
-            tracing::info!("no devices connected; stopping in {}s unless one connects", timeout.as_secs());
+            tracing::info!(
+                "no devices connected; stopping in {}s unless one connects",
+                timeout.as_secs()
+            );
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
                     tracing::info!("no devices for {}s, stopping", timeout.as_secs());
@@ -122,9 +128,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn waits_forever_before_first_device() {
         let control = Control::new(String::new());
-        let result =
-            tokio::time::timeout(Duration::from_secs(3600), run_auto_stop(&control, Duration::from_secs(60))).await;
-        assert!(result.is_err(), "auto-stop fired with no device ever connected");
+        let result = tokio::time::timeout(
+            Duration::from_secs(3600),
+            run_auto_stop(&control, Duration::from_secs(60)),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "auto-stop fired with no device ever connected"
+        );
         assert_eq!(*control.exit.borrow(), None);
     }
 

@@ -1,6 +1,6 @@
 # Linaux Screen — notes for coding sessions
 
-Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet browser. Target machine: Bazzite. Plan and issue breakdown: `README.md`, `docs/issues.md`, GitHub issues #1–10.
+Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet browser. Target machine: Bazzite. Plan and status: `README.md` and the GitHub issues (the roadmap in the README links them).
 
 ## Layout
 
@@ -9,7 +9,9 @@ Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet
 - `src/tray.rs` — ksni tray icon (status, copy address, restart, disconnect all, stop); `src/desktop.rs` — notifications + clipboard over D-Bus
 - `scripts/install.sh` — host-side install: binary to ~/.local/bin + `io.github.janders1993.LinauxScreen.desktop`
 - `src/capture.rs` — xdg-desktop-portal ScreenCast via `ashpd` (virtual monitor or mirror); stores a restore token in `~/.config/linaux-screen/`
-- `src/stream.rs` — `CaptureHub`: one long-running capture pipeline (pipewiresrc → NV12 → appsink) started at launch; each viewer `Session` is its own pipeline (appsrc → H.264 → rtph264pay → webrtcbin) fed by the hub. Also signalling message types and debug modes (`--capture-only`, `LINAUX_*` env overrides)
+- `src/pipeline.rs` — builds GStreamer pipeline descriptions (capture, encoder choice + automatic bitrate, viewer), `element_desc()`, logging helpers, `--capture-only` diagnostic
+- `src/hub.rs` — `CaptureHub`: one long-running capture pipeline (pipewiresrc → NV12 → appsink) started at launch, pushing frames to every subscribed viewer
+- `src/session.rs` — `Signal` (WebSocket messages) and `Session`: one viewer's pipeline (appsrc → H.264 → rtph264pay → webrtcbin)
 - `src/display.rs` — (opt-in via `--fit-device`, experimental: killed fps on KDE+NVIDIA) resizes the virtual monitor to the viewer's screen via `kscreen-doctor` (finds our output by diffing outputs before/after the portal starts; adds a custom mode, sets mode + scale)
 - `src/server.rs` — axum: `/` serves the viewer, `/ws` does signalling; one streaming viewer at a time (newest wins); sends `bye` on disconnect-all/stop so viewers don't auto-retry
 - `web/index.html` — the viewer, embedded into the binary with `include_str!`

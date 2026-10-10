@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -10,12 +11,15 @@ use axum::extract::{ConnectInfo, State};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
+use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 
 use crate::control::Control;
 use crate::display::{self, VirtualDisplay};
-use crate::stream::{CaptureHub, EncoderChoice, Session, Signal};
+use crate::hub::CaptureHub;
+use crate::pipeline::EncoderChoice;
+use crate::session::{Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
 
@@ -24,8 +28,8 @@ struct AppState {
     encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
-    /// Bumped on every new connection. For the spike only one viewer streams
-    /// at a time, so a new viewer takes over from the previous one.
+    /// Bumped on every new connection. One device streams at a time, so a new
+    /// connection takes over from the previous one.
     generation: watch::Sender<u64>,
 }
 
@@ -50,13 +54,20 @@ pub async fn run(
         .route(
             "/",
             get(|| async {
-                ([(axum::http::header::CACHE_CONTROL, "no-store")], Html(VIEWER_HTML))
+                (
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Html(VIEWER_HTML),
+                )
             }),
         )
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -94,7 +105,9 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     };
     tracing::info!("streaming {width}x{height} to {peer} with {encoder_name} at {kbps} kbit/s");
     tracing::debug!("viewer pipeline: {desc}");
-    let _ = signal_tx.send(Signal::Info { encoder: encoder_name });
+    let _ = signal_tx.send(Signal::Info {
+        encoder: encoder_name,
+    });
 
     let session = match Session::start(&desc, signal_tx, state.hub.clone()) {
         Ok(s) => s,
@@ -104,14 +117,6 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
             return;
         }
     };
-
-    // Tells the viewer we're closing on purpose, so it doesn't keep retrying.
-    async fn say_bye(ws_tx: &mut futures::stream::SplitSink<WebSocket, Message>, reason: &str) {
-        if let Ok(text) = serde_json::to_string(&Signal::Bye { reason: reason.into() }) {
-            let _ = ws_tx.send(Message::Text(text.into())).await;
-        }
-        let _ = ws_tx.send(Message::Close(None)).await;
-    }
 
     loop {
         tokio::select! {
@@ -159,10 +164,21 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     tracing::info!("viewer {peer} disconnected");
 }
 
-/// Resizes the virtual monitor to suit the viewer's screen, in the background.
+/// Tells the viewer we're closing on purpose, so it doesn't keep retrying.
+async fn say_bye(ws_tx: &mut SplitSink<WebSocket, Message>, reason: &str) {
+    if let Ok(text) = serde_json::to_string(&Signal::Bye {
+        reason: reason.into(),
+    }) {
+        let _ = ws_tx.send(Message::Text(text.into())).await;
+    }
+    let _ = ws_tx.send(Message::Close(None)).await;
+}
+
+/// With `--fit-device`, resizes the virtual monitor to suit the viewer's
+/// screen, in the background. In test mode it resizes the test pattern.
 fn resize_for(state: &AppState, peer: SocketAddr, width: u32, height: u32, dpr: f64) {
     let (w, h, scale) = display::plan(width, height, dpr);
-    tracing::info!("{peer} screen is {width}x{height} @{dpr}x");
+    tracing::debug!("{peer} screen is {width}x{height} @{dpr}x");
     let Some(display) = state.display.clone() else {
         if state.hub.resize_test_pattern(w, h) {
             tracing::info!("test pattern resized to {w}x{h}");
@@ -182,7 +198,7 @@ fn resize_for(state: &AppState, peer: SocketAddr, width: u32, height: u32, dpr: 
             Ok(true) => {
                 // Give KWin a moment to finish the mode change, then reconnect
                 // so the capture picks up the new size.
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
                 let result = tokio::task::spawn_blocking(move || hub.restart()).await;
                 if let Ok(Err(e)) = result {
                     tracing::error!("couldn't reconnect capture after resize: {e:#}");
