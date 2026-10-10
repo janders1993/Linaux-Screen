@@ -44,7 +44,14 @@ pub async fn run(
     });
 
     let app = Router::new()
-        .route("/", get(|| async { Html(VIEWER_HTML) }))
+        // no-store: phones otherwise keep showing an old copy of the viewer
+        // after the app is updated.
+        .route(
+            "/",
+            get(|| async {
+                ([(axum::http::header::CACHE_CONTROL, "no-store")], Html(VIEWER_HTML))
+            }),
+        )
         .route("/ws", get(ws_handler))
         .with_state(state);
 
