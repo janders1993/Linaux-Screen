@@ -99,7 +99,7 @@ distrobox enter linaux -- cp /usr/lib64/gstreamer-1.0/libgstnice.so ~/.local/sha
 
 It prints a URL such as `http://192.168.1.20:4444`. Open it on your phone or tablet on the same Wi-Fi. KDE asks once to allow screen sharing, then a new monitor appears in **System Settings → Display**. Drag it to where you want it relative to your other screens.
 
-The virtual monitor stays at KDE's 1920×1080 and is letterboxed on the device. `--fit-device` (experimental) resizes it to match the device and follows rotation, but on KDE + NVIDIA it currently costs a lot of frame rate (#4).
+The virtual monitor starts at 1920×1080, letterboxed on the device. You can change its resolution and scale in **System Settings → Display Configuration** (it's listed as *Virtual Output*). KDE remembers the setting, so it's applied every time the app starts. `--fit-device` (experimental) resizes it automatically to match the device and follows rotation, but resizing mid-stream costs a lot of frame rate on KDE + NVIDIA (#4).
 
 Options:
 
