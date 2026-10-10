@@ -156,10 +156,10 @@ pub fn capture_desc(source: &Source, fps: u32, dmabuf: bool) -> (String, String)
             props.extend_from_slice(&[
                 ("path", node.as_str()),
                 ("do-timestamp", "true"),
-                // Re-send the last frame when the desktop is idle, so a
-                // static screen doesn't stall the stream.
-                ("keepalive-time", "1000"),
             ]);
+            // Deliberately no `keepalive-time`: with it set, KWin's screencast
+            // dropped to ~1 fps. The compositor sends frames only when the
+            // screen changes, and a new viewer gets an initial frame anyway.
             if !dmabuf {
                 // Copy each frame out of the compositor's buffer straight
                 // away, so we never hold on to its small buffer pool.
