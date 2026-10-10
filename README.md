@@ -12,7 +12,7 @@ The desktop runs a small service. Your iPad, iPhone or Android device opens `htt
 - **Mirror** — duplicate an existing monitor to a device.
 - **Input** — touch as mouse, on-screen and hardware keyboards, pen with pressure and tilt (Apple Pencil, S-Pen).
 - **Audio** — desktop audio plays on the device.
-- **Zero install on clients** — any modern browser on iOS or Android; add to home screen for fullscreen.
+- **Zero install on clients** — any modern browser on iOS or Android; tap the video for fullscreen.
 - **Low latency** — hardware H.264 encoding, WebRTC transport, target under 60 ms on a good LAN.
 - **Later:** USB mode (Android via `adb reverse`, iOS via `iproxy`), multi-device video wall.
 
@@ -52,7 +52,7 @@ Capture runs in its own pipeline for the life of the app and hands frames to one
 Ordered by what matters most day to day; each step is a GitHub issue.
 
 - [x] **Spike** — virtual monitor streamed to a phone browser (#1)
-- [ ] **Polish** — fullscreen home-screen app (#9), run without a terminal (#8), audio (#3)
+- [ ] **Polish** — run without a terminal (#8), audio (#3)
 - [ ] **More devices** — several at once with QR pairing (#6), Android over USB (#7)
 - [ ] **Later** — match the monitor to the device (#4, experimental `--fit-device` flag), touch and keyboard input (#2), pen pressure (#5), video wall and iOS USB (#10)
 
