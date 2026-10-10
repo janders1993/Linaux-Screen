@@ -251,35 +251,6 @@ pub async fn run_capture_only(source: &Source, fps: u32, dmabuf: bool) -> Result
     Ok(())
 }
 
-fn restamp_capture(pipeline: &gst::Pipeline) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    let Some(src) = pipeline.by_name("capture") else { return };
-    let Some(pad) = src.static_pad("src") else { return };
-    let src_weak = src.downgrade();
-    let last = AtomicU64::new(0);
-    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-        let Some(src) = src_weak.upgrade() else { return gst::PadProbeReturn::Ok };
-        let (Some(clock), Some(base)) = (src.clock(), src.base_time()) else {
-            return gst::PadProbeReturn::Ok;
-        };
-        let mut now = clock.time().nseconds().saturating_sub(base.nseconds());
-        // Keep timestamps strictly increasing.
-        let prev = last.load(Ordering::Relaxed);
-        if now <= prev {
-            now = prev + 1;
-        }
-        last.store(now, Ordering::Relaxed);
-        if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() {
-            let buffer = buffer.make_mut();
-            buffer.set_pts(gst::ClockTime::from_nseconds(now));
-            buffer.set_dts(gst::ClockTime::NONE);
-            buffer.set_duration(gst::ClockTime::NONE);
-        }
-        gst::PadProbeReturn::Ok
-    });
-}
-
 /// Logs how many frames per second come out of the capture and how many go
 /// come out of the encoder, every 5 seconds. If capture is low, the compositor
 /// isn't delivering frames; if capture is fine but encoded is low, the encoder
@@ -333,12 +304,6 @@ impl Session {
         let webrtc = pipeline
             .by_name("webrtc")
             .context("webrtcbin missing from pipeline")?;
-
-        // Stamp every captured frame with "now". Compositors attach their own
-        // timestamps, which can be in a different time base or arrive
-        // irregularly; the encoder and the browser's playout both trust these,
-        // and bad ones show up as seconds of delay and jerky playback.
-        restamp_capture(&pipeline);
 
         if let Some(pad) = pipeline.by_name("capture").and_then(|c| c.static_pad("src")) {
             pad.connect_notify(Some("caps"), |pad, _| {
