@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>Linaux Screen</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #000; overflow: hidden;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfe;
+  }
+  video {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    object-fit: contain; background: #000;
+  }
+  #hud {
+    position: fixed; top: max(8px, env(safe-area-inset-top)); left: max(8px, env(safe-area-inset-left));
+    padding: 6px 10px; border-radius: 6px; background: rgba(0, 0, 0, .65);
+    white-space: pre; pointer-events: none;
+  }
+  #hud.hidden { display: none; }
+  #status {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; font-size: 16px; color: #8ab;
+  }
+  #status.hidden { display: none; }
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline muted></video>
+<div id="status">Connecting…</div>
+<div id="hud" class="hidden"></div>
+<script>
+"use strict";
+const video = document.getElementById("video");
+const statusEl = document.getElementById("status");
+const hud = document.getElementById("hud");
+
+let pc = null;
+let ws = null;
+let encoder = "?";
+let retryTimer = null;
+
+function setStatus(text) {
+  statusEl.textContent = text;
+  statusEl.classList.toggle("hidden", !text);
+}
+
+function connect() {
+  clearTimeout(retryTimer);
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  pc = new RTCPeerConnection({ iceServers: [] });
+
+  pc.ontrack = (e) => {
+    // Ask the browser to play frames as soon as they arrive.
+    try { e.receiver.jitterBufferTarget = 0; } catch (_) {}
+    try { e.receiver.playoutDelayHint = 0; } catch (_) {}
+    video.srcObject = e.streams[0] || new MediaStream([e.track]);
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "ice",
+        candidate: e.candidate.candidate,
+        sdpMLineIndex: e.candidate.sdpMLineIndex ?? 0,
+      }));
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState;
+    if (s === "connected") setStatus("");
+    else if (s === "failed") retry("Connection failed");
+  };
+
+  ws.onmessage = async (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "offer") {
+      await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type: "answer", sdp: answer.sdp }));
+    } else if (msg.type === "ice") {
+      try {
+        await pc.addIceCandidate({ candidate: msg.candidate, sdpMLineIndex: msg.sdpMLineIndex });
+      } catch (err) { console.warn("bad ICE candidate", err); }
+    } else if (msg.type === "info") {
+      encoder = msg.encoder;
+    }
+  };
+
+  ws.onclose = () => retry("Disconnected");
+  ws.onerror = () => {};
+}
+
+function retry(reason) {
+  if (retryTimer) return;
+  setStatus(`${reason} — reconnecting…`);
+  try { pc && pc.close(); } catch (_) {}
+  try { ws && ws.close(); } catch (_) {}
+  retryTimer = setTimeout(() => { retryTimer = null; connect(); }, 2000);
+}
+
+// Stats overlay: tap with three fingers to toggle.
+let last = null;
+setInterval(async () => {
+  if (!pc || hud.classList.contains("hidden")) return;
+  const stats = await pc.getStats();
+  stats.forEach((r) => {
+    if (r.type !== "inbound-rtp" || r.kind !== "video") return;
+    let kbps = 0, fps = r.framesPerSecond || 0, jitterMs = 0;
+    if (last && r.timestamp > last.timestamp) {
+      kbps = (8 * (r.bytesReceived - last.bytesReceived)) / (r.timestamp - last.timestamp);
+    }
+    if (r.jitterBufferEmittedCount) {
+      jitterMs = (1000 * r.jitterBufferDelay) / r.jitterBufferEmittedCount;
+    }
+    const decodeMs = r.framesDecoded ? (1000 * (r.totalDecodeTime || 0)) / r.framesDecoded : 0;
+    hud.textContent =
+      `${r.frameWidth || "?"}×${r.frameHeight || "?"} @ ${fps.toFixed(0)} fps\n` +
+      `${(kbps / 1000).toFixed(1)} Mbit/s  ${encoder}\n` +
+      `buffer ${jitterMs.toFixed(0)} ms  decode ${decodeMs.toFixed(1)} ms\n` +
+      `lost ${r.packetsLost ?? 0}  dropped ${r.framesDropped ?? 0}`;
+    last = r;
+  });
+}, 1000);
+
+document.addEventListener("touchstart", (e) => {
+  if (e.touches.length === 3) hud.classList.toggle("hidden");
+}, { passive: true });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "s") hud.classList.toggle("hidden");
+});
+
+// Android: a tap goes fullscreen. (iPhone Safari can't fullscreen a page;
+// use Share > Add to Home Screen instead.)
+document.addEventListener("click", () => {
+  const el = document.documentElement;
+  if (!document.fullscreenElement && el.requestFullscreen) {
+    el.requestFullscreen().catch(() => {});
+  }
+  video.play().catch(() => {});
+});
+
+// Keep the device screen awake while viewing.
+async function keepAwake() {
+  try { if ("wakeLock" in navigator) await navigator.wakeLock.request("screen"); } catch (_) {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") keepAwake();
+});
+keepAwake();
+
+connect();
+</script>
+</body>
+</html>
