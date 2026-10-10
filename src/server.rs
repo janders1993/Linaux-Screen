@@ -13,21 +13,28 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 
-use crate::stream::{Session, Signal};
+use crate::stream::{CaptureHub, Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
 
 struct AppState {
     pipeline_desc: String,
+    hub: Arc<CaptureHub>,
     encoder_name: String,
     /// Bumped on every new connection. For the spike only one viewer streams
     /// at a time, so a new viewer takes over from the previous one.
     generation: watch::Sender<u64>,
 }
 
-pub async fn run(addr: SocketAddr, pipeline_desc: String, encoder_name: String) -> Result<()> {
+pub async fn run(
+    addr: SocketAddr,
+    pipeline_desc: String,
+    encoder_name: String,
+    hub: Arc<CaptureHub>,
+) -> Result<()> {
     let state = Arc::new(AppState {
         pipeline_desc,
+        hub,
         encoder_name,
         generation: watch::Sender::new(0),
     });
@@ -65,7 +72,7 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
 
     let _ = signal_tx.send(Signal::Info { encoder: state.encoder_name.clone() });
 
-    let session = match Session::start(&state.pipeline_desc, signal_tx) {
+    let session = match Session::start(&state.pipeline_desc, signal_tx, state.hub.clone()) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("could not start stream for {peer}: {e:#}");

@@ -14,6 +14,7 @@ clap = { version = "4", features = ["derive"] }
 dirs = "6"
 futures = "0.3"
 gst = { package = "gstreamer", version = "0.25" }
+gst-app = { version = "0.25", package = "gstreamer-app" }
 gst-sdp = { package = "gstreamer-sdp", version = "0.25" }
 gst-webrtc = { package = "gstreamer-webrtc", version = "0.25" }
 serde = { version = "1", features = ["derive"] }

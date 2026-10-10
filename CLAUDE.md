@@ -6,11 +6,13 @@ Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet
 
 - `src/main.rs` — CLI flags, startup, prints the LAN URL
 - `src/capture.rs` — xdg-desktop-portal ScreenCast via `ashpd` (virtual monitor or mirror); stores a restore token in `~/.config/linaux-screen/`
-- `src/stream.rs` — GStreamer pipeline (pipewiresrc → NV12 → H.264 → rtph264pay → webrtcbin) and the per-viewer WebRTC session; signalling message types
+- `src/stream.rs` — `CaptureHub`: one long-running capture pipeline (pipewiresrc → NV12 → appsink) started at launch; each viewer `Session` is its own pipeline (appsrc → H.264 → rtph264pay → webrtcbin) fed by the hub. Also signalling message types and debug modes (`--capture-only`, `LINAUX_*` env overrides)
 - `src/server.rs` — axum: `/` serves the viewer, `/ws` does signalling; one streaming viewer at a time (newest wins)
 - `web/index.html` — the viewer, embedded into the binary with `include_str!`
 
 ## Conventions
+
+- Keep capture in its own pipeline. Capture inside the per-viewer WebRTC pipeline ran at ~1 fps on KWin; separate, it runs at full rate. Also: no `keepalive-time` on pipewiresrc (throttled KWin to ~1 fps), and always request `max-framerate` (otherwise ~1 fps).
 
 - Server is always the WebRTC offerer; the browser answers.
 - Encoder/element properties go through `element_desc()`, which drops properties or enum values the installed GStreamer doesn't support, so one unknown property can't break the pipeline.

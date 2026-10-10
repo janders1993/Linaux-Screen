@@ -124,13 +124,12 @@ pub fn encoder(kind: EncoderKind, bitrate_kbps: u32) -> Result<(String, String)>
     ))
 }
 
-/// Full pipeline description for one viewer.
-pub fn pipeline_desc(source: &Source, encoder: &str, fps: u32, dmabuf: bool) -> String {
-    let (src, convert) = capture_desc(source, fps, dmabuf);
+/// Pipeline description for one viewer: takes NV12 frames from the capture
+/// hub via `appsrc`, encodes and sends them over WebRTC.
+pub fn viewer_desc(encoder: &str) -> String {
     format!(
-        "{src} \
+        "appsrc name=src is-live=true format=time do-timestamp=true \
          ! queue max-size-buffers=1 leaky=downstream \
-         ! {convert} ! video/x-raw,format=NV12 \
          ! {encoder} \
          ! h264parse name=parse \
          ! rtph264pay name=pay config-interval=-1 aggregate-mode=zero-latency \
@@ -234,14 +233,8 @@ pub async fn run_capture_only(source: &Source, fps: u32, dmabuf: bool) -> Result
     let pipeline = gst::parse::launch(&desc)?
         .downcast::<gst::Pipeline>()
         .map_err(|_| anyhow!("not a pipeline"))?;
-    if let Some(pad) = pipeline.by_name("capture").and_then(|c| c.static_pad("src")) {
-        pad.connect_notify(Some("caps"), |pad, _| {
-            if let Some(caps) = pad.current_caps() {
-                tracing::info!("capture format: {caps}");
-            }
-        });
-    }
-    spawn_frame_counter(&pipeline);
+    log_capture_caps(&pipeline);
+    spawn_fps_logger(&pipeline, "capture", "capture");
     pipeline.set_state(gst::State::Playing)?;
     println!("\n  Capture-only mode: move windows on the captured screen, Ctrl+C to stop.\n");
     let bus = pipeline.bus().context("no bus")?;
@@ -262,52 +255,193 @@ pub async fn run_capture_only(source: &Source, fps: u32, dmabuf: bool) -> Result
     Ok(())
 }
 
-/// Logs how many frames per second come out of the capture and how many go
-/// come out of the encoder, every 5 seconds. If capture is low, the compositor
-/// isn't delivering frames; if capture is fine but encoded is low, the encoder
-/// is the bottleneck; if both are fine, look at the network.
-fn spawn_frame_counter(pipeline: &gst::Pipeline) {
+/// Logs, every 5 seconds, how many buffers per second leave the element
+/// called `element` in `pipeline`.
+fn spawn_fps_logger(pipeline: &gst::Pipeline, element: &str, label: &'static str) {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
-    let count = |name: &str| -> Option<Arc<AtomicU64>> {
-        let pad = pipeline.by_name(name)?.static_pad("src")?;
-        let counter = Arc::new(AtomicU64::new(0));
-        let c = counter.clone();
-        pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-            c.fetch_add(1, Ordering::Relaxed);
-            gst::PadProbeReturn::Ok
-        });
-        Some(counter)
+    let Some(pad) = pipeline.by_name(element).and_then(|e| e.static_pad("src")) else {
+        return;
     };
-    let Some(captured) = count("capture") else { return };
-    let sent = count("parse");
+    let counter = Arc::new(AtomicU64::new(0));
+    let c = counter.clone();
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+        c.fetch_add(1, Ordering::Relaxed);
+        gst::PadProbeReturn::Ok
+    });
     let weak = pipeline.downgrade();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         tick.tick().await;
-        while weak.upgrade().is_some() {
+        loop {
             tick.tick().await;
-            let c = captured.swap(0, Ordering::Relaxed) as f64 / 5.0;
-            match &sent {
-                Some(sent) => {
-                    let e = sent.swap(0, Ordering::Relaxed) as f64 / 5.0;
-                    tracing::info!("capture {c:.1} fps, encoded {e:.1} fps");
+            if weak.upgrade().is_none() {
+                break;
+            }
+            let fps = counter.swap(0, Ordering::Relaxed) as f64 / 5.0;
+            tracing::info!("{label} {fps:.1} fps");
+        }
+    });
+}
+
+fn log_capture_caps(pipeline: &gst::Pipeline) {
+    if let Some(pad) = pipeline.by_name("capture").and_then(|c| c.static_pad("src")) {
+        pad.connect_notify(Some("caps"), |pad, _| {
+            if let Some(caps) = pad.current_caps() {
+                tracing::info!("capture format: {caps}");
+            }
+        });
+    }
+}
+
+fn spawn_bus_logger(pipeline: &gst::Pipeline, what: &'static str) -> Result<()> {
+    let bus = pipeline.bus().context("pipeline has no bus")?;
+    tokio::spawn(async move {
+        let mut messages = bus.stream();
+        while let Some(msg) = messages.next().await {
+            match msg.view() {
+                gst::MessageView::Error(err) => {
+                    tracing::error!(
+                        "{what} pipeline error from {:?}: {} ({:?})",
+                        err.src().map(|s| s.path_string()),
+                        err.error(),
+                        err.debug()
+                    );
+                    break;
                 }
-                None => tracing::info!("capture {c:.1} fps"),
+                gst::MessageView::Warning(w) => {
+                    tracing::warn!("{what} pipeline warning: {} ({:?})", w.error(), w.debug());
+                }
+                gst::MessageView::Eos(_) => break,
+                _ => {}
             }
         }
     });
+    Ok(())
+}
+
+/// The screen capture, running for the whole life of the program in its own
+/// pipeline. Each viewer subscribes and gets every frame pushed into its own
+/// encoding pipeline.
+///
+/// Keeping capture separate matters: with capture and WebRTC in one pipeline
+/// started when a phone connects, KWin delivered ~1 fps, while the same
+/// capture on its own ran at 30-75 fps. It also means a viewer joining while
+/// the screen is idle immediately gets the last frame.
+pub struct CaptureHub {
+    pipeline: gst::Pipeline,
+    shared: std::sync::Arc<HubShared>,
+}
+
+#[derive(Default)]
+struct HubShared {
+    viewers: std::sync::Mutex<Vec<(u64, gst_app::AppSrc)>>,
+    last: std::sync::Mutex<Option<gst::Sample>>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl HubShared {
+    fn push(appsrc: &gst_app::AppSrc, sample: &gst::Sample) {
+        let (Some(buffer), Some(caps)) = (sample.buffer(), sample.caps()) else { return };
+        let caps = caps.to_owned();
+        if appsrc.caps().as_ref() != Some(&caps) {
+            appsrc.set_caps(Some(&caps));
+        }
+        // Each viewer stamps frames with its own clock (do-timestamp), so
+        // drop the capture pipeline's timestamps.
+        let mut buffer = buffer.copy();
+        {
+            let b = buffer.make_mut();
+            b.set_pts(gst::ClockTime::NONE);
+            b.set_dts(gst::ClockTime::NONE);
+            b.set_duration(gst::ClockTime::NONE);
+        }
+        let _ = appsrc.push_buffer(buffer);
+    }
+}
+
+impl CaptureHub {
+    pub fn start(source: &Source, fps: u32, dmabuf: bool) -> Result<Self> {
+        let (src, convert) = capture_desc(source, fps, dmabuf);
+        let desc = format!(
+            "{src} \
+             ! queue max-size-buffers=1 leaky=downstream \
+             ! {convert} ! video/x-raw,format=NV12 \
+             ! appsink name=sink sync=false max-buffers=1 drop=true"
+        );
+        tracing::debug!("capture pipeline: {desc}");
+        let pipeline = gst::parse::launch(&desc)
+            .with_context(|| format!("could not build capture pipeline: {desc}"))?
+            .downcast::<gst::Pipeline>()
+            .map_err(|_| anyhow!("capture description did not produce a pipeline"))?;
+        let sink = pipeline
+            .by_name("sink")
+            .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
+            .context("appsink missing from capture pipeline")?;
+
+        let shared = std::sync::Arc::new(HubShared::default());
+        let cb_shared = shared.clone();
+        sink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    for (_, appsrc) in cb_shared.viewers.lock().unwrap().iter() {
+                        HubShared::push(appsrc, &sample);
+                    }
+                    *cb_shared.last.lock().unwrap() = Some(sample);
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+
+        log_capture_caps(&pipeline);
+        spawn_fps_logger(&pipeline, "capture", "capture");
+        spawn_bus_logger(&pipeline, "capture")?;
+        pipeline
+            .set_state(gst::State::Playing)
+            .context("capture pipeline refused to start — run with RUST_LOG=debug GST_DEBUG=3")?;
+        Ok(Self { pipeline, shared })
+    }
+
+    /// Start feeding frames to `appsrc`; returns an id for `unsubscribe`.
+    fn subscribe(&self, appsrc: gst_app::AppSrc) -> u64 {
+        let id = self
+            .shared
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(sample) = self.shared.last.lock().unwrap().as_ref() {
+            HubShared::push(&appsrc, sample);
+        }
+        self.shared.viewers.lock().unwrap().push((id, appsrc));
+        id
+    }
+
+    fn unsubscribe(&self, id: u64) {
+        self.shared.viewers.lock().unwrap().retain(|(i, _)| *i != id);
+    }
+}
+
+impl Drop for CaptureHub {
+    fn drop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
 }
 
 /// One viewer's pipeline. Dropping it stops the stream.
 pub struct Session {
     pipeline: gst::Pipeline,
     webrtc: gst::Element,
+    hub: std::sync::Arc<CaptureHub>,
+    subscription: u64,
 }
 
 impl Session {
-    pub fn start(desc: &str, tx: UnboundedSender<Signal>) -> Result<Self> {
+    pub fn start(
+        desc: &str,
+        tx: UnboundedSender<Signal>,
+        hub: std::sync::Arc<CaptureHub>,
+    ) -> Result<Self> {
         let pipeline = gst::parse::launch(desc)
             .with_context(|| format!("could not build pipeline: {desc}"))?
             .downcast::<gst::Pipeline>()
@@ -316,14 +450,11 @@ impl Session {
             .by_name("webrtc")
             .context("webrtcbin missing from pipeline")?;
 
-        if let Some(pad) = pipeline.by_name("capture").and_then(|c| c.static_pad("src")) {
-            pad.connect_notify(Some("caps"), |pad, _| {
-                if let Some(caps) = pad.current_caps() {
-                    tracing::info!("capture format: {caps}");
-                }
-            });
-        }
-        spawn_frame_counter(&pipeline);
+        let appsrc = pipeline
+            .by_name("src")
+            .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+            .context("appsrc missing from viewer pipeline")?;
+        spawn_fps_logger(&pipeline, "parse", "encoded");
 
         // We only send video; tell the browser not to bother sending any.
         if let Some(transceiver) =
@@ -378,36 +509,14 @@ impl Session {
             tracing::info!("viewer connection: {state:?}");
         });
 
-        // Log pipeline errors (e.g. encoder negotiation failures) instead of
-        // failing silently.
-        let bus = pipeline.bus().context("pipeline has no bus")?;
-        tokio::spawn(async move {
-            let mut messages = bus.stream();
-            while let Some(msg) = messages.next().await {
-                match msg.view() {
-                    gst::MessageView::Error(err) => {
-                        tracing::error!(
-                            "pipeline error from {:?}: {} ({:?})",
-                            err.src().map(|s| s.path_string()),
-                            err.error(),
-                            err.debug()
-                        );
-                        break;
-                    }
-                    gst::MessageView::Warning(w) => {
-                        tracing::warn!("pipeline warning: {} ({:?})", w.error(), w.debug());
-                    }
-                    gst::MessageView::Eos(_) => break,
-                    _ => {}
-                }
-            }
-        });
+        spawn_bus_logger(&pipeline, "viewer")?;
 
         pipeline
             .set_state(gst::State::Playing)
             .context("pipeline refused to start — run with RUST_LOG=debug GST_DEBUG=3 for details")?;
 
-        Ok(Self { pipeline, webrtc })
+        let subscription = hub.subscribe(appsrc);
+        Ok(Self { pipeline, webrtc, hub, subscription })
     }
 
     pub fn handle(&self, signal: Signal) -> Result<()> {
@@ -434,6 +543,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.hub.unsubscribe(self.subscription);
         let _ = self.pipeline.set_state(gst::State::Null);
     }
 }

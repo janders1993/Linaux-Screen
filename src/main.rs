@@ -114,18 +114,20 @@ async fn main() -> Result<()> {
         drop(capture);
         return Ok(());
     }
-    let desc = stream::pipeline_desc(&source, &encoder_desc, args.fps, args.dmabuf);
-    tracing::debug!("pipeline: {desc}");
+    let hub = std::sync::Arc::new(stream::CaptureHub::start(&source, args.fps, args.dmabuf)?);
+    let desc = stream::viewer_desc(&encoder_desc);
+    tracing::debug!("viewer pipeline: {desc}");
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), args.port);
     let ip = lan_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "<this-pc-ip>".into());
     println!("\n  Open on your phone or tablet:  http://{ip}:{}\n", args.port);
 
     tokio::select! {
-        result = server::run(addr, desc, encoder_name) => result?,
+        result = server::run(addr, desc, encoder_name, hub.clone()) => result?,
         _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
     }
 
+    drop(hub);
     drop(capture);
     Ok(())
 }
