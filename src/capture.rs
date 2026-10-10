@@ -34,7 +34,59 @@ fn token_path(kind: SourceKind) -> Option<PathBuf> {
         SourceKind::Monitor => "restore_token_monitor",
         SourceKind::Test => return None,
     };
-    dirs::config_dir().map(|d| d.join("linaux-screen").join(name))
+    // KDE grants permission per app, and decides which app we are from how
+    // we were launched (the app menu vs. a terminal like Konsole). Keep one
+    // token per launcher so switching between them doesn't re-prompt.
+    let file = match launcher_id() {
+        Some(id) => format!("{name}-{id}"),
+        None => name.to_owned(),
+    };
+    dirs::config_dir().map(|d| d.join("linaux-screen").join(file))
+}
+
+/// The app KDE will attribute us to, from our systemd unit, e.g.
+/// `app-io.github.janders1993.LinauxScreen@1234.service` or
+/// `app-org.kde.konsole@5678.service` → `io.github.janders1993.LinauxScreen`.
+fn launcher_id() -> Option<String> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    launcher_id_from_cgroup(&cgroup)
+}
+
+fn launcher_id_from_cgroup(cgroup: &str) -> Option<String> {
+    let unit = cgroup.lines().last()?.rsplit('/').next()?;
+    let unit = unit.strip_prefix("app-")?;
+    let unit = unit
+        .strip_suffix(".service")
+        .or_else(|| unit.strip_suffix(".scope"))
+        .unwrap_or(unit);
+    let id = unit.split('@').next()?;
+    let id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::launcher_id_from_cgroup;
+
+    #[test]
+    fn app_menu_launch() {
+        let cg = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-io.github.janders1993.LinauxScreen@d56ddd55aa8d4f12.service";
+        assert_eq!(launcher_id_from_cgroup(cg).as_deref(), Some("io.github.janders1993.LinauxScreen"));
+    }
+
+    #[test]
+    fn konsole_launch() {
+        let cg = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.kde.konsole@1a2b.service";
+        assert_eq!(launcher_id_from_cgroup(cg).as_deref(), Some("org.kde.konsole"));
+    }
+
+    #[test]
+    fn unknown_launcher() {
+        assert_eq!(launcher_id_from_cgroup("0::/system.slice/sshd.service"), None);
+    }
 }
 
 pub async fn start(kind: SourceKind) -> Result<Capture> {
@@ -63,24 +115,36 @@ pub async fn start(kind: SourceKind) -> Result<Capture> {
         .map(|t| t.trim().to_owned())
         .filter(|t| !t.is_empty());
 
-    let session = proxy.create_session(Default::default()).await?;
-    proxy
-        .select_sources(
-            &session,
-            SelectSourcesOptions::default()
-                .set_cursor_mode(CursorMode::Embedded)
-                .set_sources(ashpd::enumflags2::BitFlags::from_flag(source))
-                .set_multiple(false)
-                .set_persist_mode(PersistMode::ExplicitlyRevoked)
-                .set_restore_token(saved_token.as_deref()),
-        )
-        .await?;
-
-    let streams = proxy
-        .start(&session, None, Default::default())
-        .await?
-        .response()
-        .context("screen sharing was cancelled or refused")?;
+    // A saved permission token only works for the app that was granted it.
+    // If KDE refuses it (e.g. it was issued when running from a terminal,
+    // where KDE sees the app as Konsole), forget it and ask again.
+    let mut token = saved_token;
+    let (session, streams) = loop {
+        let session = proxy.create_session(Default::default()).await?;
+        proxy
+            .select_sources(
+                &session,
+                SelectSourcesOptions::default()
+                    .set_cursor_mode(CursorMode::Embedded)
+                    .set_sources(ashpd::enumflags2::BitFlags::from_flag(source))
+                    .set_multiple(false)
+                    .set_persist_mode(PersistMode::ExplicitlyRevoked)
+                    .set_restore_token(token.as_deref()),
+            )
+            .await?;
+        let result = proxy.start(&session, None, Default::default()).await?.response();
+        match result {
+            Ok(streams) => break (session, streams),
+            Err(e) if token.is_some() => {
+                tracing::warn!("saved screen-sharing permission was refused ({e}); asking again");
+                if let Some(path) = &token_file {
+                    let _ = std::fs::remove_file(path);
+                }
+                token = None;
+            }
+            Err(e) => return Err(e).context("screen sharing was cancelled or refused"),
+        }
+    };
 
     if let (Some(path), Some(token)) = (token_file, streams.restore_token()) {
         if let Some(dir) = path.parent() {
