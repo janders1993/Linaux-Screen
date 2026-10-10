@@ -2,19 +2,22 @@ mod capture;
 mod control;
 mod desktop;
 mod display;
+mod hub;
+mod pipeline;
 mod server;
-mod stream;
+mod session;
 mod tray;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 
-use control::Exit;
+use control::{Control, Exit};
+use hub::CaptureHub;
+use pipeline::{EncoderChoice, Source};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum SourceKind {
@@ -83,21 +86,9 @@ struct Args {
     #[arg(long)]
     no_tray: bool,
 
-    /// Debug: only capture and count frames (no encoding or streaming)
+    /// Diagnostic: only capture and count frames (no encoding or streaming)
     #[arg(long)]
     capture_only: bool,
-
-    /// Debug: stream an existing PipeWire node instead of asking the portal
-    #[arg(long, hide = true)]
-    pipewire_node: Option<u32>,
-}
-
-/// The address other devices on the LAN can reach us at. Connecting a UDP
-/// socket sends nothing; it just makes the OS pick the outgoing interface.
-fn lan_ip() -> Option<IpAddr> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:80").ok()?;
-    socket.local_addr().ok().map(|a| a.ip())
 }
 
 #[tokio::main]
@@ -108,34 +99,39 @@ async fn main() -> Result<()> {
 
     // Claim the port before anything else. If it's taken, the app is almost
     // certainly already running (e.g. launched twice from the app menu).
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), args.port);
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && !args.capture_only => {
-            tracing::warn!("port {} is in use; is Linaux Screen already running?", args.port);
-            desktop::notify(
-                "Already running",
-                "Linaux Screen is already running. Use its tray icon to restart or stop it.",
-            )
-            .await;
-            return Ok(());
+    let listener = if args.capture_only {
+        None
+    } else {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), args.port);
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => Some(l),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tracing::warn!(
+                    "port {} is in use; is Linaux Screen already running?",
+                    args.port
+                );
+                desktop::notify(
+                    "Already running",
+                    "Linaux Screen is already running. Use its tray icon to restart or stop it.",
+                )
+                .await;
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
         }
-        Err(e) => return Err(e.into()),
     };
 
-    // Debug: LINAUX_ENCODER replaces the encoder element and its settings,
-    // e.g. LINAUX_ENCODER="nvh264enc" to try driver defaults.
-    let custom = std::env::var("LINAUX_ENCODER").ok().filter(|c| !c.trim().is_empty());
-    let encoder_choice = stream::EncoderChoice { kind: args.encoder, bitrate_kbps: args.bitrate, custom };
+    let encoder = EncoderChoice {
+        kind: args.encoder,
+        bitrate_kbps: args.bitrate,
+    };
     // Check an encoder is available now rather than when a device connects.
-    let (encoder_name, _, _) = encoder_choice.viewer_pipeline(1920, 1080)?;
+    let (encoder_name, _, _) = encoder.viewer_pipeline(1920, 1080)?;
     tracing::info!("using encoder {encoder_name}");
 
-    // Held until exit: dropping it ends the screencast and removes the
-    // virtual monitor.
-    let resize = args.source == SourceKind::Virtual && args.pipewire_node.is_none() && args.fit_device;
-    // Note the existing outputs, so we can tell which one the portal adds.
-    let outputs_before = if resize {
+    // With --fit-device, note the existing outputs so we can tell which one
+    // the portal adds.
+    let outputs_before = if args.fit_device && args.source == SourceKind::Virtual {
         match display::output_names().await {
             Ok(names) => Some(names),
             Err(e) => {
@@ -146,13 +142,24 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let capture = match (args.pipewire_node, args.source) {
-        (Some(_), _) | (None, SourceKind::Test) => None,
-        (None, kind) => Some(capture::start(kind).await?),
+
+    // Held until exit: dropping it ends the screencast and removes the
+    // virtual monitor.
+    let capture = match args.source {
+        SourceKind::Test => None,
+        kind => Some(capture::start(kind).await?),
     };
+    let source = match &capture {
+        Some(c) => Source::PipeWire {
+            fd: c.pipewire_fd(),
+            node_id: c.node_id,
+        },
+        None => Source::Test,
+    };
+
     let virtual_display = match outputs_before {
         Some(before) => match display::VirtualDisplay::find_new(&before).await {
-            Ok(d) => Some(std::sync::Arc::new(d)),
+            Ok(d) => Some(Arc::new(d)),
             Err(e) => {
                 tracing::warn!("can't resize the virtual monitor to fit devices: {e:#}");
                 None
@@ -160,23 +167,20 @@ async fn main() -> Result<()> {
         },
         None => None,
     };
-    let source = match (&capture, args.pipewire_node) {
-        (Some(c), _) => stream::Source::PipeWire { fd: Some(c.pipewire_fd()), node_id: c.node_id },
-        (None, Some(node_id)) => stream::Source::PipeWire { fd: None, node_id },
-        (None, None) => stream::Source::Test,
-    };
-    if args.capture_only {
-        stream::run_capture_only(&source, args.fps, args.dmabuf).await?;
-        drop(capture);
-        return Ok(());
-    }
-    let hub = std::sync::Arc::new(stream::CaptureHub::start(&source, args.fps, args.dmabuf)?);
 
-    let ip = lan_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "<this-pc-ip>".into());
+    let Some(listener) = listener else {
+        pipeline::run_capture_only(&source, args.fps, args.dmabuf).await?;
+        return Ok(());
+    };
+    let hub = Arc::new(CaptureHub::start(&source, args.fps, args.dmabuf)?);
+
+    let ip = lan_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "<this-pc-ip>".into());
     let address = format!("http://{ip}:{}", args.port);
     println!("\n  Open on your phone or tablet:  {address}\n");
 
-    let control = Arc::new(control::Control::new(address.clone()));
+    let control = Arc::new(Control::new(address.clone()));
     if !args.no_tray {
         tokio::spawn(tray::run(control.clone()));
     }
@@ -185,11 +189,15 @@ async fn main() -> Result<()> {
         let timeout = Duration::from_secs(args.idle_timeout);
         tokio::spawn(async move { control::run_auto_stop(&c, timeout).await });
     }
-    desktop::notify("Second screen ready", &format!("Open {address} on your phone or tablet")).await;
+    desktop::notify(
+        "Second screen ready",
+        &format!("Open {address} on your phone or tablet"),
+    )
+    .await;
 
     let mut exit_rx = control.exit.subscribe();
     let why = tokio::select! {
-        result = server::run(listener, control.clone(), encoder_choice, hub.clone(), virtual_display) => {
+        result = server::run(listener, control.clone(), encoder, hub.clone(), virtual_display) => {
             result?;
             Exit::Stop
         }
@@ -209,11 +217,23 @@ async fn main() -> Result<()> {
     match why {
         Exit::Restart => restart(),
         Exit::Idle => {
-            desktop::notify("Second screen stopped", "No device was connected for a while.").await;
+            desktop::notify(
+                "Second screen stopped",
+                "No device was connected for a while.",
+            )
+            .await;
         }
         Exit::Stop => {}
     }
     Ok(())
+}
+
+/// The address other devices on the LAN can reach us at. Connecting a UDP
+/// socket sends nothing; it just makes the OS pick the outgoing interface.
+fn lan_ip() -> Option<IpAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:80").ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
 }
 
 /// Replaces this process with a fresh copy of the app, same arguments.
@@ -223,12 +243,17 @@ fn restart() {
     let exe = std::env::current_exe()
         .map(|p| {
             // After an update the running binary shows as "... (deleted)".
-            let s = p.to_string_lossy().trim_end_matches(" (deleted)").to_owned();
+            let s = p
+                .to_string_lossy()
+                .trim_end_matches(" (deleted)")
+                .to_owned();
             std::path::PathBuf::from(s)
         })
         .unwrap_or_else(|_| "linaux-screen".into());
     tracing::info!("restarting");
-    let err = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    let err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .exec();
     tracing::error!("couldn't restart: {err}");
 }
 

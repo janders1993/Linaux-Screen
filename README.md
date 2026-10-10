@@ -2,9 +2,9 @@
 
 Turn any phone or tablet into a second monitor for your Linux desktop — no app install on the device. Inspired by spacedesk, built for KDE Plasma on Wayland (developed and tested on Bazzite).
 
-The desktop runs a small service. Your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extended (or mirrored) display with touch, pen, keyboard and audio.
+You start the app on the PC, and your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extra (or mirrored) display.
 
-> **Status:** working display. A KDE virtual monitor streams to a phone browser at ~55 fps with no noticeable delay (tested on Bazzite, KDE Plasma, NVIDIA/NVENC, Galaxy S22 Ultra). Display only — no touch input yet. The monitor is a fixed 1920×1080, letterboxed on the device.
+> **Status:** working, used day to day. Runs from the app menu with a tray icon, streams at ~55 fps (1080p) with no noticeable delay, and stops itself when no device is connected. Tested on Bazzite, KDE Plasma, NVIDIA/NVENC, a Galaxy S22 Ultra and an iPad. Display only; touch input is planned for later.
 
 ## Goals
 
@@ -30,22 +30,20 @@ Capture runs in its own pipeline for the life of the app and hands frames to one
 | Piece | Technology |
 |---|---|
 | Virtual monitor | KWin virtual output via the ScreenCast portal (virtual source type) |
-| Capture | PipeWire |
-| Encode | GStreamer, `vah264enc` (AMD/Intel) or `nvh264enc` (NVIDIA) |
-| Transport | WebRTC (`webrtcbin`), signalling over WebSocket |
-| Mouse / touch / keyboard | xdg-desktop-portal RemoteDesktop (absolute pointer mapped to the stream) |
-| Pen pressure / tilt | uinput virtual tablet, mapped to the virtual output |
-| Audio | PipeWire capture → Opus in the same WebRTC session |
-| Server | Rust: `ashpd`, `gstreamer-rs`, `axum` |
-| Viewer | Plain HTML/JS page served by the binary, PWA manifest |
-| Running | systemd user service + tray icon |
+| Capture | PipeWire → GStreamer, colour-converted to NV12 |
+| Encode | GStreamer: `nvh264enc` (NVIDIA), `vah264enc` (AMD/Intel) or `x264enc` (software) |
+| Transport | WebRTC (`webrtcbin`), signalling over a WebSocket |
+| Server | Rust: `ashpd`, `gstreamer-rs`, `axum`; tray icon via `ksni` |
+| Viewer | One plain HTML/JS page served by the app |
+| Running | App-menu entry; tray icon while running; stops after a minute with no device |
 
-## Requirements (planned)
+Planned, not built yet: touch/keyboard input (RemoteDesktop portal), pen pressure (uinput), audio (PipeWire → Opus in the same WebRTC session).
 
-- KDE Plasma 6 on Wayland
-- PipeWire, xdg-desktop-portal-kde
-- GPU with hardware H.264 encoding
-- Access to `/dev/uinput` for pen support (udev rule)
+## Requirements
+
+- KDE Plasma 6 on Wayland, with PipeWire and xdg-desktop-portal-kde
+- A GPU with hardware H.264 encoding (or a CPU to spare for software encoding)
+- The phone/tablet on the same network, with a modern browser
 
 ## Roadmap
 

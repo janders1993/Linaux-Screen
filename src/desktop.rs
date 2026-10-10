@@ -23,7 +23,16 @@ async fn try_notify(summary: &str, body: &str) -> zbus::Result<()> {
         "/org/freedesktop/Notifications",
         Some("org.freedesktop.Notifications"),
         "Notify",
-        &(APP_NAME, 0u32, ICON, summary, body, Vec::<&str>::new(), hints, 8000i32),
+        &(
+            APP_NAME,
+            0u32,
+            ICON,
+            summary,
+            body,
+            Vec::<&str>::new(),
+            hints,
+            8000i32,
+        ),
     )
     .await?;
     Ok(())

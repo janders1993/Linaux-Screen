@@ -44,14 +44,22 @@ async fn screen() -> Result<Screen> {
         .await
         .context("could not run kscreen-doctor (is this KDE Plasma?)")?;
     if !out.status.success() {
-        bail!("kscreen-doctor -j failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "kscreen-doctor -j failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     serde_json::from_slice(&out.stdout).context("could not parse kscreen-doctor -j output")
 }
 
 /// Names of the current outputs, e.g. `["DP-1", "HDMI-A-1"]`.
 pub async fn output_names() -> Result<Vec<String>> {
-    Ok(screen().await?.outputs.into_iter().map(|o| o.name).collect())
+    Ok(screen()
+        .await?
+        .outputs
+        .into_iter()
+        .map(|o| o.name)
+        .collect())
 }
 
 fn json_id(v: &serde_json::Value) -> String {
@@ -112,13 +120,19 @@ impl VirtualDisplay {
                         .map(|o| json_id(&o.id))
                         .ok_or_else(|| anyhow!("output {name} vanished"))?;
                     tracing::info!("virtual monitor has kscreen id {id}");
-                    return Ok(Self { name: name.clone(), id, current: Default::default() });
+                    return Ok(Self {
+                        name: name.clone(),
+                        id,
+                        current: Default::default(),
+                    });
                 }
                 [] => tokio::time::sleep(Duration::from_millis(100)).await,
                 many => bail!("several new outputs appeared ({many:?}); not sure which is ours"),
             }
         }
-        Err(anyhow!("no new output appeared after starting the virtual monitor"))
+        Err(anyhow!(
+            "no new output appeared after starting the virtual monitor"
+        ))
     }
 
     /// Sets the monitor to `width`×`height` pixels at 60 Hz, scaled by
@@ -171,7 +185,11 @@ impl VirtualDisplay {
             .iter()
             .map(|m| format!("{}x{}@{:.0}", m.size.width, m.size.height, m.refresh_rate))
             .collect();
-        Ok(if list.is_empty() { "(none)".into() } else { list.join(", ") })
+        Ok(if list.is_empty() {
+            "(none)".into()
+        } else {
+            list.join(", ")
+        })
     }
 
     /// The id of an existing mode with this size, preferring ~60 Hz.
@@ -205,7 +223,11 @@ impl VirtualDisplay {
 pub fn plan(width: u32, height: u32, dpr: f64) -> (u32, u32, f64) {
     const MAX_EDGE: u32 = 4096;
     let long = width.max(height).max(1);
-    let shrink = if long > MAX_EDGE { MAX_EDGE as f64 / long as f64 } else { 1.0 };
+    let shrink = if long > MAX_EDGE {
+        MAX_EDGE as f64 / long as f64
+    } else {
+        1.0
+    };
     let even = |v: u32| (((v as f64 * shrink) as u32) / 2 * 2).max(2);
     let scale = ((dpr * shrink).clamp(1.0, 4.0) * 4.0).round() / 4.0;
     (even(width), even(height), scale)

@@ -74,18 +74,27 @@ mod tests {
     #[test]
     fn app_menu_launch() {
         let cg = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-io.github.janders1993.LinauxScreen@d56ddd55aa8d4f12.service";
-        assert_eq!(launcher_id_from_cgroup(cg).as_deref(), Some("io.github.janders1993.LinauxScreen"));
+        assert_eq!(
+            launcher_id_from_cgroup(cg).as_deref(),
+            Some("io.github.janders1993.LinauxScreen")
+        );
     }
 
     #[test]
     fn konsole_launch() {
         let cg = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.kde.konsole@1a2b.service";
-        assert_eq!(launcher_id_from_cgroup(cg).as_deref(), Some("org.kde.konsole"));
+        assert_eq!(
+            launcher_id_from_cgroup(cg).as_deref(),
+            Some("org.kde.konsole")
+        );
     }
 
     #[test]
     fn unknown_launcher() {
-        assert_eq!(launcher_id_from_cgroup("0::/system.slice/sshd.service"), None);
+        assert_eq!(
+            launcher_id_from_cgroup("0::/system.slice/sshd.service"),
+            None
+        );
     }
 }
 
@@ -132,7 +141,10 @@ pub async fn start(kind: SourceKind) -> Result<Capture> {
                     .set_restore_token(token.as_deref()),
             )
             .await?;
-        let result = proxy.start(&session, None, Default::default()).await?.response();
+        let result = proxy
+            .start(&session, None, Default::default())
+            .await?
+            .response();
         match result {
             Ok(streams) => break (session, streams),
             Err(e) if token.is_some() => {
@@ -170,7 +182,6 @@ pub async fn start(kind: SourceKind) -> Result<Capture> {
 
     Ok(Capture {
         node_id,
-
         fd,
         _session: session,
         _proxy: proxy,

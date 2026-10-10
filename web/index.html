@@ -125,7 +125,8 @@ function connect() {
 }
 
 // Tell the PC how much room the video has, in real pixels, so the virtual
-// monitor can match it exactly. That's the page area, not the whole screen:
+// monitor can match it when the app runs with --fit-device (otherwise the
+// PC ignores this). That's the page area, not the whole screen:
 // in a normal browser tab the address and navigation bars take some, while in
 // fullscreen or a home-screen app it's the full screen. Rotating, entering
 // fullscreen or the bars appearing all fire a resize, which re-sends this.
@@ -230,15 +231,6 @@ document.addEventListener("click", () => {
   }
   video.play().catch(() => {});
 });
-
-// Keep the device screen awake while viewing.
-async function keepAwake() {
-  try { if ("wakeLock" in navigator) await navigator.wakeLock.request("screen"); } catch (_) {}
-}
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") keepAwake();
-});
-keepAwake();
 
 connect();
 </script>
