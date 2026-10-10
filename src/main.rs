@@ -48,6 +48,10 @@ struct Args {
     /// Video bitrate in kbit/s
     #[arg(short, long, default_value_t = 8000)]
     bitrate: u32,
+
+    /// Debug: stream an existing PipeWire node instead of asking the portal
+    #[arg(long, hide = true)]
+    pipewire_node: Option<u32>,
 }
 
 /// The address other devices on the LAN can reach us at. Connecting a UDP
@@ -75,13 +79,14 @@ async fn main() -> Result<()> {
 
     // Held until exit: dropping it ends the screencast and removes the
     // virtual monitor.
-    let capture = match args.source {
-        SourceKind::Test => None,
-        kind => Some(capture::start(kind).await?),
+    let capture = match (args.pipewire_node, args.source) {
+        (Some(_), _) | (None, SourceKind::Test) => None,
+        (None, kind) => Some(capture::start(kind).await?),
     };
-    let source = match &capture {
-        Some(c) => stream::Source::PipeWire { fd: c.pipewire_fd(), node_id: c.node_id },
-        None => stream::Source::Test,
+    let source = match (&capture, args.pipewire_node) {
+        (Some(c), _) => stream::Source::PipeWire { fd: Some(c.pipewire_fd()), node_id: c.node_id },
+        (None, Some(node_id)) => stream::Source::PipeWire { fd: None, node_id },
+        (None, None) => stream::Source::Test,
     };
     let desc = stream::pipeline_desc(&source, &encoder_desc);
     tracing::debug!("pipeline: {desc}");

@@ -34,7 +34,9 @@ pub enum Signal {
 
 /// Where the frames come from.
 pub enum Source {
-    PipeWire { fd: i32, node_id: u32 },
+    /// `fd` is the portal's PipeWire remote; `None` connects to the default
+    /// PipeWire daemon (used by `--pipewire-node` for debugging).
+    PipeWire { fd: Option<i32>, node_id: u32 },
     Test,
 }
 
@@ -126,22 +128,30 @@ pub fn encoder(kind: EncoderKind, bitrate_kbps: u32) -> Result<(String, String)>
 pub fn pipeline_desc(source: &Source, encoder: &str) -> String {
     let src = match source {
         Source::PipeWire { fd, node_id } => {
-            let pw = element_desc(
-                "pipewiresrc",
-                &[
-                    ("fd", &fd.to_string()),
-                    ("path", &node_id.to_string()),
+            let fd_str = fd.map(|f| f.to_string());
+            let mut props: Vec<(&str, &str)> = Vec::new();
+            if let Some(f) = &fd_str {
+                props.push(("fd", f));
+            }
+            let node = node_id.to_string();
+            props.extend_from_slice(&[
+                    ("path", node.as_str()),
                     ("do-timestamp", "true"),
+                    // Copy each frame out of the compositor's buffer straight
+                    // away. Without this we hold on to KWin's small buffer
+                    // pool and it can only send a new frame when one comes
+                    // back, which looks like ~1 fps.
+                    ("always-copy", "true"),
                     // Re-send the last frame when the desktop is idle, so a
                     // static screen doesn't stall the stream.
                     ("keepalive-time", "1000"),
-                ],
-            )
-            .unwrap_or_else(|| format!("pipewiresrc fd={fd} path={node_id}"));
-            format!("{pw} ! video/x-raw")
+            ]);
+            let pw = element_desc("pipewiresrc", &props)
+                .unwrap_or_else(|| format!("pipewiresrc path={node_id}"));
+            format!("{pw} name=capture ! video/x-raw")
         }
         Source::Test => {
-            let base = "videotestsrc is-live=true pattern=ball \
+            let base = "videotestsrc name=capture is-live=true pattern=ball \
                  ! video/x-raw,width=1280,height=720,framerate=60/1";
             // A running clock makes latency easy to eyeball, if pango is installed.
             match element_desc("timeoverlay", &[]) {
@@ -158,11 +168,74 @@ pub fn pipeline_desc(source: &Source, encoder: &str) -> String {
          ! queue max-size-buffers=1 leaky=downstream \
          ! {convert} ! video/x-raw,format=NV12 \
          ! {encoder} \
-         ! h264parse \
-         ! rtph264pay config-interval=-1 aggregate-mode=zero-latency \
+         ! h264parse name=parse \
+         ! rtph264pay name=pay config-interval=-1 aggregate-mode=zero-latency \
          ! application/x-rtp,media=video,encoding-name=H264,payload=96 \
          ! webrtcbin name=webrtc bundle-policy=max-bundle"
     )
+}
+
+fn restamp_capture(pipeline: &gst::Pipeline) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let Some(src) = pipeline.by_name("capture") else { return };
+    let Some(pad) = src.static_pad("src") else { return };
+    let src_weak = src.downgrade();
+    let last = AtomicU64::new(0);
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        let Some(src) = src_weak.upgrade() else { return gst::PadProbeReturn::Ok };
+        let (Some(clock), Some(base)) = (src.clock(), src.base_time()) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let mut now = clock.time().nseconds().saturating_sub(base.nseconds());
+        // Keep timestamps strictly increasing.
+        let prev = last.load(Ordering::Relaxed);
+        if now <= prev {
+            now = prev + 1;
+        }
+        last.store(now, Ordering::Relaxed);
+        if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() {
+            let buffer = buffer.make_mut();
+            buffer.set_pts(gst::ClockTime::from_nseconds(now));
+            buffer.set_dts(gst::ClockTime::NONE);
+            buffer.set_duration(gst::ClockTime::NONE);
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// Logs how many frames per second come out of the capture and how many go
+/// come out of the encoder, every 5 seconds. If capture is low, the compositor
+/// isn't delivering frames; if capture is fine but encoded is low, the encoder
+/// is the bottleneck; if both are fine, look at the network.
+fn spawn_frame_counter(pipeline: &gst::Pipeline) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let count = |name: &str| -> Option<Arc<AtomicU64>> {
+        let pad = pipeline.by_name(name)?.static_pad("src")?;
+        let counter = Arc::new(AtomicU64::new(0));
+        let c = counter.clone();
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            c.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+        Some(counter)
+    };
+    let (Some(captured), Some(sent)) = (count("capture"), count("parse")) else {
+        return;
+    };
+    let weak = pipeline.downgrade();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        tick.tick().await;
+        while weak.upgrade().is_some() {
+            tick.tick().await;
+            let c = captured.swap(0, Ordering::Relaxed) as f64 / 5.0;
+            let e = sent.swap(0, Ordering::Relaxed) as f64 / 5.0;
+            tracing::info!("capture {c:.1} fps, encoded {e:.1} fps");
+        }
+    });
 }
 
 /// One viewer's pipeline. Dropping it stops the stream.
@@ -180,6 +253,14 @@ impl Session {
         let webrtc = pipeline
             .by_name("webrtc")
             .context("webrtcbin missing from pipeline")?;
+
+        // Stamp every captured frame with "now". Compositors attach their own
+        // timestamps, which can be in a different time base or arrive
+        // irregularly; the encoder and the browser's playout both trust these,
+        // and bad ones show up as seconds of delay and jerky playback.
+        restamp_capture(&pipeline);
+
+        spawn_frame_counter(&pipeline);
 
         // We only send video; tell the browser not to bother sending any.
         if let Some(transceiver) =
