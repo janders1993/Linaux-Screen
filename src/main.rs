@@ -59,10 +59,11 @@ struct Args {
     #[arg(long)]
     dmabuf: bool,
 
-    /// Keep the virtual monitor at the size KDE gives it instead of matching
-    /// the viewing device's screen
+    /// Experimental: resize the virtual monitor to match the viewing device
+    /// and follow its rotation. Off by default: on KDE + NVIDIA the resizes
+    /// and capture reconnects hurt frame rate badly.
     #[arg(long)]
-    no_resize: bool,
+    fit_device: bool,
 
     /// Debug: only capture and count frames (no encoding or streaming)
     #[arg(long)]
@@ -106,7 +107,7 @@ async fn main() -> Result<()> {
 
     // Held until exit: dropping it ends the screencast and removes the
     // virtual monitor.
-    let resize = args.source == SourceKind::Virtual && args.pipewire_node.is_none() && !args.no_resize;
+    let resize = args.source == SourceKind::Virtual && args.pipewire_node.is_none() && args.fit_device;
     // Note the existing outputs, so we can tell which one the portal adds.
     let outputs_before = if resize {
         match display::output_names().await {

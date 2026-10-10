@@ -4,7 +4,7 @@ Turn any phone or tablet into a second monitor for your Linux desktop — no app
 
 The desktop runs a small service. Your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extended (or mirrored) display with touch, pen, keyboard and audio.
 
-> **Status:** working display. A KDE virtual monitor streams to a phone browser at ~55 fps with no noticeable delay (tested on Bazzite, KDE Plasma, NVIDIA/NVENC, Galaxy S22 Ultra). Display only — no touch input yet. Matching the monitor to the device's resolution and rotation is in progress (#4).
+> **Status:** working display. A KDE virtual monitor streams to a phone browser at ~55 fps with no noticeable delay (tested on Bazzite, KDE Plasma, NVIDIA/NVENC, Galaxy S22 Ultra). Display only — no touch input yet. The monitor is a fixed 1920×1080, letterboxed on the device.
 
 ## Goals
 
@@ -52,10 +52,9 @@ Capture runs in its own pipeline for the life of the app and hands frames to one
 Ordered by what matters most day to day; each step is a GitHub issue.
 
 - [x] **Spike** — virtual monitor streamed to a phone browser (#1)
-- [ ] **Match the device** — resolution, scaling and rotation follow the phone/tablet (#4, in progress)
 - [ ] **Polish** — fullscreen home-screen app (#9), run without a terminal (#8), audio (#3)
 - [ ] **More devices** — several at once with QR pairing (#6), Android over USB (#7)
-- [ ] **Later** — touch and keyboard input (#2), pen pressure (#5), video wall and iOS USB (#10)
+- [ ] **Later** — match the monitor to the device (#4, experimental `--fit-device` flag), touch and keyboard input (#2), pen pressure (#5), video wall and iOS USB (#10)
 
 ## Building and running (spike)
 
@@ -100,7 +99,7 @@ distrobox enter linaux -- cp /usr/lib64/gstreamer-1.0/libgstnice.so ~/.local/sha
 
 It prints a URL such as `http://192.168.1.20:4444`. Open it on your phone or tablet on the same Wi-Fi. KDE asks once to allow screen sharing, then a new monitor appears in **System Settings → Display**. Drag it to where you want it relative to your other screens.
 
-The virtual monitor takes the size of the area the page has on the device (the whole screen in fullscreen or as a home-screen app, or the space between the browser's bars in a normal tab) at the device's pixel density, and follows rotation. **Work in progress** (#4).
+The virtual monitor stays at KDE's 1920×1080 and is letterboxed on the device. `--fit-device` (experimental) resizes it to match the device and follows rotation, but on KDE + NVIDIA it currently costs a lot of frame rate (#4).
 
 Options:
 
@@ -110,7 +109,7 @@ Options:
 | `--encoder auto\|vaapi\|nvenc\|x264` | `auto` | H.264 encoder; `auto` tries VA-API, NVENC, then software |
 | `--bitrate <kbps>` | `8000` | Video bitrate |
 | `--port <n>` | `4444` | Port to serve on |
-| `--no-resize` | off | Keep KDE's default monitor size instead of matching the device |
+| `--fit-device` | off | Experimental: match the monitor to the device's screen and rotation (hurts frame rate for now) |
 
 On the device: tap with **three fingers** (or press `s`) to show stats — resolution, fps, bitrate, buffer and decode time. On Android a tap goes fullscreen; on iPhone use **Share → Add to Home Screen**.
 

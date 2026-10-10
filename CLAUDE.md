@@ -7,7 +7,7 @@ Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet
 - `src/main.rs` — CLI flags, startup, prints the LAN URL
 - `src/capture.rs` — xdg-desktop-portal ScreenCast via `ashpd` (virtual monitor or mirror); stores a restore token in `~/.config/linaux-screen/`
 - `src/stream.rs` — `CaptureHub`: one long-running capture pipeline (pipewiresrc → NV12 → appsink) started at launch; each viewer `Session` is its own pipeline (appsrc → H.264 → rtph264pay → webrtcbin) fed by the hub. Also signalling message types and debug modes (`--capture-only`, `LINAUX_*` env overrides)
-- `src/display.rs` — resizes the virtual monitor to the viewer's screen via `kscreen-doctor` (finds our output by diffing outputs before/after the portal starts; adds a custom mode, sets mode + scale)
+- `src/display.rs` — (opt-in via `--fit-device`, experimental: killed fps on KDE+NVIDIA) resizes the virtual monitor to the viewer's screen via `kscreen-doctor` (finds our output by diffing outputs before/after the portal starts; adds a custom mode, sets mode + scale)
 - `src/server.rs` — axum: `/` serves the viewer, `/ws` does signalling; one streaming viewer at a time (newest wins)
 - `web/index.html` — the viewer, embedded into the binary with `include_str!`
 
