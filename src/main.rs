@@ -54,7 +54,7 @@ struct Args {
     fps: u32,
 
     /// Capture frames as GPU buffers (DMA-BUF) and convert on the GPU.
-    /// Much faster than the default on NVIDIA.
+    /// Experimental: on KDE + NVIDIA it measured ~20 fps vs ~55 fps default.
     #[arg(long)]
     dmabuf: bool,
 

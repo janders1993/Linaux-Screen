@@ -4,7 +4,7 @@ Turn any phone or tablet into a second monitor for your Linux desktop — no app
 
 The desktop runs a small service. Your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extended (or mirrored) display with touch, pen, keyboard and audio.
 
-> **Status:** spike (issue #1). Streaming to a browser works end to end with a test pattern; capturing a real KDE virtual monitor still needs testing on a Plasma desktop.
+> **Status:** spike (issue #1). A KDE virtual monitor streams to a phone browser at ~55 fps (tested on Bazzite, KDE Plasma, NVIDIA/NVENC). Display only for now; touch input is next (#2).
 
 ## Goals
 
