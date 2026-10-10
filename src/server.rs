@@ -136,12 +136,30 @@ fn resize_for(state: &AppState, peer: SocketAddr, width: u32, height: u32, dpr: 
     let Some(display) = state.display.clone() else {
         if state.hub.resize_test_pattern(w, h) {
             tracing::info!("test pattern resized to {w}x{h}");
+            // Reconnect like the real monitor does, so tests cover it.
+            let hub = state.hub.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = hub.restart() {
+                    tracing::error!("couldn't reconnect capture after resize: {e:#}");
+                }
+            });
         }
         return;
     };
+    let hub = state.hub.clone();
     tokio::spawn(async move {
-        if let Err(e) = display.apply(w, h, scale).await {
-            tracing::warn!("couldn't resize the virtual monitor: {e:#}");
+        match display.apply(w, h, scale).await {
+            Ok(true) => {
+                // Give KWin a moment to finish the mode change, then reconnect
+                // so the capture picks up the new size.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let result = tokio::task::spawn_blocking(move || hub.restart()).await;
+                if let Ok(Err(e)) = result {
+                    tracing::error!("couldn't reconnect capture after resize: {e:#}");
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!("couldn't resize the virtual monitor: {e:#}"),
         }
     });
 }

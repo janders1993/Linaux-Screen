@@ -89,6 +89,9 @@ pub struct VirtualDisplay {
     /// kscreen-doctor splits arguments on dots, and KDE's virtual monitor
     /// names contain dots (`Virtual-virtual-xdp-kde-org.kde.konsole`).
     id: String,
+    /// The size we last applied; also serialises resizes so quick rotations
+    /// don't interleave kscreen-doctor calls.
+    current: tokio::sync::Mutex<Option<(u32, u32, f64)>>,
 }
 
 impl VirtualDisplay {
@@ -109,7 +112,7 @@ impl VirtualDisplay {
                         .map(|o| json_id(&o.id))
                         .ok_or_else(|| anyhow!("output {name} vanished"))?;
                     tracing::info!("virtual monitor has kscreen id {id}");
-                    return Ok(Self { name: name.clone(), id });
+                    return Ok(Self { name: name.clone(), id, current: Default::default() });
                 }
                 [] => tokio::time::sleep(Duration::from_millis(100)).await,
                 many => bail!("several new outputs appeared ({many:?}); not sure which is ours"),
@@ -119,8 +122,12 @@ impl VirtualDisplay {
     }
 
     /// Sets the monitor to `width`×`height` pixels at 60 Hz, scaled by
-    /// `scale`.
-    pub async fn apply(&self, width: u32, height: u32, scale: f64) -> Result<()> {
+    /// `scale`. Returns false if it was already that size.
+    pub async fn apply(&self, width: u32, height: u32, scale: f64) -> Result<bool> {
+        let mut current = self.current.lock().await;
+        if *current == Some((width, height, scale)) {
+            return Ok(false);
+        }
         let name = &self.id;
         let mut mode = self.find_mode(width, height).await?;
         if mode.is_none() {
@@ -148,8 +155,9 @@ impl VirtualDisplay {
             bail!("{e:#}. Modes KDE lists for this monitor: {available}");
         }
         kscreen(&[format!("output.{name}.scale.{scale}")]).await?;
+        *current = Some((width, height, scale));
         tracing::info!("virtual monitor set to {width}x{height} at scale {scale}");
-        Ok(())
+        Ok(true)
     }
 
     /// The monitor's modes, for error messages.

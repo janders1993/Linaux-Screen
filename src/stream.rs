@@ -305,24 +305,38 @@ fn log_capture_caps(pipeline: &gst::Pipeline) {
 
 fn spawn_bus_logger(pipeline: &gst::Pipeline, what: &'static str) -> Result<()> {
     let bus = pipeline.bus().context("pipeline has no bus")?;
+    let weak = pipeline.downgrade();
     tokio::spawn(async move {
         let mut messages = bus.stream();
-        while let Some(msg) = messages.next().await {
-            match msg.view() {
-                gst::MessageView::Error(err) => {
-                    tracing::error!(
-                        "{what} pipeline error from {:?}: {} ({:?})",
-                        err.src().map(|s| s.path_string()),
-                        err.error(),
-                        err.debug()
-                    );
-                    break;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                msg = messages.next() => {
+                    let Some(msg) = msg else { break };
+                    match msg.view() {
+                        gst::MessageView::Error(err) => {
+                            tracing::error!(
+                                "{what} pipeline error from {:?}: {} ({:?})",
+                                err.src().map(|s| s.path_string()),
+                                err.error(),
+                                err.debug()
+                            );
+                            break;
+                        }
+                        gst::MessageView::Warning(w) => {
+                            tracing::warn!("{what} pipeline warning: {} ({:?})", w.error(), w.debug());
+                        }
+                        gst::MessageView::Eos(_) => break,
+                        _ => {}
+                    }
                 }
-                gst::MessageView::Warning(w) => {
-                    tracing::warn!("{what} pipeline warning: {} ({:?})", w.error(), w.debug());
+                _ = tick.tick() => {
+                    // Stop once the pipeline has been replaced or dropped.
+                    match weak.upgrade() {
+                        Some(p) if p.current_state() != gst::State::Null => {}
+                        _ => break,
+                    }
                 }
-                gst::MessageView::Eos(_) => break,
-                _ => {}
             }
         }
     });
@@ -338,7 +352,8 @@ fn spawn_bus_logger(pipeline: &gst::Pipeline, what: &'static str) -> Result<()> 
 /// capture on its own ran at 30-75 fps. It also means a viewer joining while
 /// the screen is idle immediately gets the last frame.
 pub struct CaptureHub {
-    pipeline: gst::Pipeline,
+    desc: String,
+    pipeline: std::sync::Mutex<gst::Pipeline>,
     shared: std::sync::Arc<HubShared>,
 }
 
@@ -379,16 +394,28 @@ impl CaptureHub {
              ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
         tracing::debug!("capture pipeline: {desc}");
-        let pipeline = gst::parse::launch(&desc)
+        let shared = std::sync::Arc::new(HubShared::default());
+        let pipeline = Self::build(&desc, &shared, None)?;
+        Ok(Self { desc, pipeline: std::sync::Mutex::new(pipeline), shared })
+    }
+
+    fn build(
+        desc: &str,
+        shared: &std::sync::Arc<HubShared>,
+        test_caps: Option<gst::Caps>,
+    ) -> Result<gst::Pipeline> {
+        let pipeline = gst::parse::launch(desc)
             .with_context(|| format!("could not build capture pipeline: {desc}"))?
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow!("capture description did not produce a pipeline"))?;
+        if let (Some(caps), Some(filter)) = (test_caps, pipeline.by_name("testcaps")) {
+            filter.set_property("caps", caps);
+        }
         let sink = pipeline
             .by_name("sink")
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .context("appsink missing from capture pipeline")?;
 
-        let shared = std::sync::Arc::new(HubShared::default());
         let cb_shared = shared.clone();
         sink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
@@ -409,7 +436,23 @@ impl CaptureHub {
         pipeline
             .set_state(gst::State::Playing)
             .context("capture pipeline refused to start — run with RUST_LOG=debug GST_DEBUG=3")?;
-        Ok(Self { pipeline, shared })
+        Ok(pipeline)
+    }
+
+    /// Reconnects to the screen. After KDE resizes the monitor, the existing
+    /// PipeWire connection keeps delivering frames at the old size (with the
+    /// new-size desktop cropped or padded inside them); a fresh connection
+    /// negotiates the new size. Viewers stay subscribed throughout.
+    pub fn restart(&self) -> Result<()> {
+        let mut pipeline = self.pipeline.lock().unwrap();
+        // Test pattern: carry its current size over to the new pipeline.
+        let test_caps = pipeline
+            .by_name("testcaps")
+            .map(|f| f.property::<gst::Caps>("caps"));
+        let _ = pipeline.set_state(gst::State::Null);
+        *pipeline = Self::build(&self.desc, &self.shared, test_caps)?;
+        tracing::info!("capture reconnected");
+        Ok(())
     }
 
     /// Start feeding frames to `appsrc`; returns an id for `unsubscribe`.
@@ -428,7 +471,7 @@ impl CaptureHub {
     /// Test pattern only: change the frame size, as if the monitor resized.
     /// Returns false if this isn't the test source.
     pub fn resize_test_pattern(&self, width: u32, height: u32) -> bool {
-        let Some(filter) = self.pipeline.by_name("testcaps") else { return false };
+        let Some(filter) = self.pipeline.lock().unwrap().by_name("testcaps") else { return false };
         let caps = gst::Caps::builder("video/x-raw")
             .field("width", width as i32)
             .field("height", height as i32)
@@ -445,7 +488,7 @@ impl CaptureHub {
 
 impl Drop for CaptureHub {
     fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        let _ = self.pipeline.lock().unwrap().set_state(gst::State::Null);
     }
 }
 

@@ -101,14 +101,16 @@ function connect() {
   ws.onerror = () => {};
 }
 
-// Tell the PC this device's screen size so the virtual monitor can match it.
-// Uses the full screen (not the browser window) in the current orientation,
-// in real pixels.
+// Tell the PC how much room the video has, in real pixels, so the virtual
+// monitor can match it exactly. That's the page area, not the whole screen:
+// in a normal browser tab the address and navigation bars take some, while in
+// fullscreen or a home-screen app it's the full screen. Rotating, entering
+// fullscreen or the bars appearing all fire a resize, which re-sends this.
 function displayInfo() {
-  let w = screen.width, h = screen.height;
-  const portrait = matchMedia("(orientation: portrait)").matches;
-  if ((w > h) === portrait) [w, h] = [h, w];
   const dpr = window.devicePixelRatio || 1;
+  const vv = window.visualViewport;
+  const w = vv ? vv.width * vv.scale : window.innerWidth;
+  const h = vv ? vv.height * vv.scale : window.innerHeight;
   return {
     type: "display",
     width: Math.round(w * dpr),

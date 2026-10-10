@@ -100,7 +100,7 @@ distrobox enter linaux -- cp /usr/lib64/gstreamer-1.0/libgstnice.so ~/.local/sha
 
 It prints a URL such as `http://192.168.1.20:4444`. Open it on your phone or tablet on the same Wi-Fi. KDE asks once to allow screen sharing, then a new monitor appears in **System Settings → Display**. Drag it to where you want it relative to your other screens.
 
-The virtual monitor is meant to take the connected device's resolution and pixel density and flip with rotation. **Work in progress:** the device's size and rotation are detected, but KDE hasn't yet accepted the custom resolution (see #4).
+The virtual monitor takes the size of the area the page has on the device (the whole screen in fullscreen or as a home-screen app, or the space between the browser's bars in a normal tab) at the device's pixel density, and follows rotation. **Work in progress** (#4).
 
 Options:
 
