@@ -30,6 +30,11 @@ pub enum Signal {
     Info {
         encoder: String,
     },
+    /// Server is closing this connection on purpose; the viewer shouldn't
+    /// reconnect by itself. `reason` is "disconnected" or "stopped".
+    Bye {
+        reason: String,
+    },
     /// The viewer's screen in physical pixels, sent on connect and rotation.
     Display {
         width: u32,

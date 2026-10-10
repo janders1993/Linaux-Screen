@@ -17,12 +17,17 @@ gst = { package = "gstreamer", version = "0.25" }
 gst-app = { version = "0.25", package = "gstreamer-app" }
 gst-sdp = { package = "gstreamer-sdp", version = "0.25" }
 gst-webrtc = { package = "gstreamer-webrtc", version = "0.25" }
+ksni = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zbus = "5"
 
 [profile.release]
 lto = "thin"
 strip = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

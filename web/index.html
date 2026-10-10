@@ -28,12 +28,20 @@
     text-align: center; padding: 24px; font-size: 16px; color: #8ab;
   }
   #status.hidden { display: none; }
+  #hint {
+    position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom));
+    transform: translateX(-50%); padding: 10px 16px; border-radius: 20px;
+    background: rgba(0, 0, 0, .7); color: #dde; font-size: 15px;
+    pointer-events: none; transition: opacity .4s;
+  }
+  #hint.hidden { opacity: 0; }
 </style>
 </head>
 <body>
 <video id="video" autoplay playsinline muted></video>
 <div id="status">Connecting…</div>
 <div id="hud" class="hidden"></div>
+<div id="hint" class="hidden">Tap the screen for fullscreen</div>
 <script>
 "use strict";
 const video = document.getElementById("video");
@@ -44,6 +52,11 @@ let pc = null;
 let ws = null;
 let encoder = "?";
 let retryTimer = null;
+let failures = 0;
+// Set when the PC closes the connection on purpose: "disconnected" (from its
+// tray menu: wait for a tap) or "stopped" (keep checking quietly, so it
+// reconnects by itself when the app is started again).
+let ended = null;
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -76,7 +89,7 @@ function connect() {
 
   pc.onconnectionstatechange = () => {
     const s = pc.connectionState;
-    if (s === "connected") setStatus("");
+    if (s === "connected") { setStatus(""); failures = 0; showFullscreenHint(); }
     else if (s === "failed") retry("Connection failed");
   };
 
@@ -91,13 +104,23 @@ function connect() {
       try {
         await pc.addIceCandidate({ candidate: msg.candidate, sdpMLineIndex: msg.sdpMLineIndex });
       } catch (err) { console.warn("bad ICE candidate", err); }
+    } else if (msg.type === "bye") {
+      ended = msg.reason;
+      try { pc && pc.close(); } catch (_) {}
+      video.srcObject = null;
+      if (ended === "disconnected") setStatus("Disconnected from the PC. Tap to reconnect.");
+      else setStatus("Stopped on the PC. This page reconnects by itself when it's started again.");
     } else if (msg.type === "info") {
       encoder = msg.encoder;
     }
   };
 
-  ws.onopen = () => sendDisplay();
-  ws.onclose = () => retry("Disconnected");
+  ws.onopen = () => { ended = null; sendDisplay(); };
+  ws.onclose = () => {
+    if (ended === "disconnected") return;  // wait for a tap
+    if (ended === "stopped") { retry(null, 5000); return; }
+    retry("Disconnected");
+  };
   ws.onerror = () => {};
 }
 
@@ -135,13 +158,32 @@ function displayChanged() {
 window.addEventListener("resize", displayChanged);
 if (screen.orientation) screen.orientation.addEventListener("change", displayChanged);
 
-function retry(reason) {
+function retry(reason, delay = 2000) {
   if (retryTimer) return;
-  setStatus(`${reason} — reconnecting…`);
+  failures++;
+  if (reason) {
+    setStatus(failures > 3
+      ? "Can't reach the PC. Is Linaux Screen running? Still trying…"
+      : `${reason}, reconnecting…`);
+  }
   try { pc && pc.close(); } catch (_) {}
   try { ws && ws.close(); } catch (_) {}
-  retryTimer = setTimeout(() => { retryTimer = null; connect(); }, 2000);
+  retryTimer = setTimeout(() => { retryTimer = null; connect(); }, delay);
 }
+
+// A short hint the first time video appears, where fullscreen is possible
+// (Android; iPhone Safari can't make a page fullscreen).
+let hintShown = false;
+function showFullscreenHint() {
+  const hint = document.getElementById("hint");
+  if (hintShown || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  hintShown = true;
+  hint.classList.remove("hidden");
+  setTimeout(() => hint.classList.add("hidden"), 4000);
+}
+document.addEventListener("fullscreenchange", () => {
+  if (document.fullscreenElement) document.getElementById("hint").classList.add("hidden");
+});
 
 // Stats overlay: tap with three fingers to toggle.
 let last = null;
@@ -177,6 +219,11 @@ document.addEventListener("keydown", (e) => {
 // Android: a tap goes fullscreen. (iPhone Safari can't fullscreen a page;
 // use Share > Add to Home Screen instead.)
 document.addEventListener("click", () => {
+  if (ended === "disconnected") {
+    ended = null;
+    setStatus("Connecting…");
+    connect();
+  }
   const el = document.documentElement;
   if (!document.fullscreenElement && el.requestFullscreen) {
     el.requestFullscreen().catch(() => {});

@@ -13,12 +13,14 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 
+use crate::control::Control;
 use crate::display::{self, VirtualDisplay};
 use crate::stream::{CaptureHub, Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
 
 struct AppState {
+    control: Arc<Control>,
     pipeline_desc: String,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
@@ -29,13 +31,15 @@ struct AppState {
 }
 
 pub async fn run(
-    addr: SocketAddr,
+    listener: tokio::net::TcpListener,
+    control: Arc<Control>,
     pipeline_desc: String,
     encoder_name: String,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
 ) -> Result<()> {
     let state = Arc::new(AppState {
+        control,
         pipeline_desc,
         hub,
         display,
@@ -55,7 +59,6 @@ pub async fn run(
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
@@ -70,6 +73,9 @@ async fn ws_handler(
 
 async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>) {
     tracing::info!("viewer connected from {peer}");
+    let _registered = state.control.viewer_connected(peer);
+    let mut kick_rx = state.control.kick.subscribe();
+    let mut exit_rx = state.control.exit.subscribe();
 
     let mut my_generation = 0;
     state.generation.send_modify(|g| {
@@ -92,8 +98,25 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
         }
     };
 
+    // Tells the viewer we're closing on purpose, so it doesn't keep retrying.
+    async fn say_bye(ws_tx: &mut futures::stream::SplitSink<WebSocket, Message>, reason: &str) {
+        if let Ok(text) = serde_json::to_string(&Signal::Bye { reason: reason.into() }) {
+            let _ = ws_tx.send(Message::Text(text.into())).await;
+        }
+        let _ = ws_tx.send(Message::Close(None)).await;
+    }
+
     loop {
         tokio::select! {
+            Ok(()) = kick_rx.changed() => {
+                tracing::info!("disconnecting {peer} (disconnect all)");
+                say_bye(&mut ws_tx, "disconnected").await;
+                break;
+            }
+            Ok(()) = exit_rx.changed() => {
+                say_bye(&mut ws_tx, "stopped").await;
+                break;
+            }
             Some(signal) = signal_rx.recv() => {
                 let Ok(text) = serde_json::to_string(&signal) else { continue };
                 if ws_tx.send(Message::Text(text.into())).await.is_err() {

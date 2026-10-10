@@ -52,11 +52,12 @@ Capture runs in its own pipeline for the life of the app and hands frames to one
 Ordered by what matters most day to day; each step is a GitHub issue.
 
 - [x] **Spike** — virtual monitor streamed to a phone browser (#1)
-- [ ] **Polish** — run without a terminal (#8), audio (#3)
+- [x] **Run without a terminal**: app-menu entry, tray icon, auto-stop (#8)
+- [ ] **Polish**: audio (#3)
 - [ ] **More devices** — several at once with QR pairing (#6), Android over USB (#7)
 - [ ] **Later** — match the monitor to the device (#4, experimental `--fit-device` flag), touch and keyboard input (#2), pen pressure (#5), video wall and iOS USB (#10)
 
-## Building and running (spike)
+## Setup
 
 Bazzite is immutable, so build inside a Fedora distrobox (matching Bazzite's Fedora version), then run the binary on the host. Running on the host means you get Bazzite's GStreamer, including its hardware H.264 encoders, which plain Fedora leaves out.
 
@@ -91,17 +92,39 @@ mkdir -p ~/.local/share/gstreamer-1.0/plugins
 distrobox enter linaux -- cp /usr/lib64/gstreamer-1.0/libgstnice.so ~/.local/share/gstreamer-1.0/plugins/
 ```
 
-**Run** (on the host):
+**Install** (on the host, after building):
 
 ```bash
-~/Linaux-Screen/target/release/linaux-screen
+~/Linaux-Screen/scripts/install.sh --no-build
 ```
 
-It prints a URL such as `http://192.168.1.20:4444`. Open it on your phone or tablet on the same Wi-Fi. KDE asks once to allow screen sharing, then a new monitor appears in **System Settings → Display**. Drag it to where you want it relative to your other screens.
+This puts the app in `~/.local/bin` and adds **Linaux Screen** to the app menu. Nothing starts at login. To update later, pull and re-run the script without `--no-build`; it rebuilds in the box first:
+
+```bash
+cd ~/Linaux-Screen && git pull && scripts/install.sh
+```
+
+`scripts/install.sh --uninstall` removes it again.
+
+## Using it
+
+1. **Start it on the PC.** Open **Linaux Screen** from the app menu or KRunner (Alt+Space). The first time, KDE asks to allow screen sharing. A notification shows the address, and a tray icon appears while it's running.
+2. **On the phone or tablet,** open the address, e.g. `http://192.168.1.20:4444`. Saving it as a home-screen bookmark makes this one tap. Tap the video for fullscreen (Android).
+3. **When you're done,** just close the page or put the device down. A minute after the last device disconnects, the app stops by itself and the virtual monitor disappears. Nothing counts down while it's waiting for the first device.
+
+The **tray menu** shows who's connected, and has:
+- **Copy address**
+- **Restart**: also picks up a newly installed version.
+- **Disconnect all devices**: they show "tap to reconnect".
+- **Stop**
+
+A new monitor appears in **System Settings → Display** while it runs. Drag it to where you want it relative to your other screens.
 
 The virtual monitor starts at 1920×1080, letterboxed on the device. You can change its resolution and scale in **System Settings → Display Configuration** (it's listed as *Virtual Output*). KDE remembers the setting, so it's applied every time the app starts. `--fit-device` (experimental) resizes it automatically to match the device and follows rotation, but resizing mid-stream costs a lot of frame rate on KDE + NVIDIA (#4).
 
-Options:
+On the device: tap with **three fingers** (or press `s`) to show stats: resolution, fps, bitrate, buffer and decode time.
+
+**Running from a terminal** works too: `linaux-screen` (with any options below). Logs always go to `~/.local/state/linaux-screen/linaux-screen.log`.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -109,18 +132,18 @@ Options:
 | `--encoder auto\|vaapi\|nvenc\|x264` | `auto` | H.264 encoder; `auto` tries VA-API, NVENC, then software |
 | `--bitrate <kbps>` | `8000` | Video bitrate |
 | `--port <n>` | `4444` | Port to serve on |
+| `--idle-timeout <secs>` | `60` | Stop this long after the last device leaves (`0` = never) |
+| `--no-tray` | off | No tray icon |
 | `--fit-device` | off | Experimental: match the monitor to the device's screen and rotation (hurts frame rate for now) |
-
-On the device: tap with **three fingers** (or press `s`) to show stats — resolution, fps, bitrate, buffer and decode time. On Android a tap goes fullscreen; on iPhone use **Share → Add to Home Screen**.
 
 **Troubleshooting**
 
 - Check which GStreamer pieces you have: `gst-inspect-1.0 webrtcbin nicesrc pipewiresrc vah264enc nvh264enc x264enc`
-- If something fails, run with `RUST_LOG=debug GST_DEBUG=3 cargo run --release` and attach the output to an issue.
+- If something fails, check `~/.local/state/linaux-screen/linaux-screen.log`, or run `RUST_LOG=debug GST_DEBUG=3 linaux-screen` in a terminal and attach the output to an issue.
 - If the network path is in doubt, `--source test` streams a moving test pattern with no screen capture involved.
 - Firewall: allow TCP 4444 and UDP (WebRTC picks random high ports), e.g. `sudo firewall-cmd --add-port=4444/tcp --add-port=1024-65535/udp` for a quick test.
 
 ## Bazzite notes
 
-- Bazzite is immutable: the plan is a single static-ish binary in `~/.local/bin` plus a systemd user unit, no rpm-ostree layering needed for normal use.
+- Bazzite is immutable: the app is a single binary in `~/.local/bin` plus an app-menu entry. No rpm-ostree layering needed (apart from the `nicesrc` plugin copy above).
 - Portals ask for consent on first run; the app stores the restore token so it won't ask every session.
