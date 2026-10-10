@@ -131,7 +131,7 @@ On the device: tap with **three fingers** (or press `s`) to show stats: resoluti
 |---|---|---|
 | `--source virtual\|monitor\|test` | `virtual` | New extended monitor, mirror an existing one, or a test pattern (no capture) |
 | `--encoder auto\|vaapi\|nvenc\|x264` | `auto` | H.264 encoder; `auto` tries VA-API, NVENC, then software |
-| `--bitrate <kbps>` | `8000` | Video bitrate |
+| `--bitrate <kbps>` | automatic | Video bitrate. Automatic picks it from the resolution: about 12000 at 1080p, 34000 at 4K |
 | `--port <n>` | `4444` | Port to serve on |
 | `--idle-timeout <secs>` | `60` | Stop this long after the last device leaves (`0` = never) |
 | `--no-tray` | off | No tray icon |

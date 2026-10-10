@@ -94,13 +94,18 @@ pub fn encoder(kind: EncoderKind, bitrate_kbps: u32) -> Result<(String, String)>
                     ("bitrate", &br),
                     ("key-int-max", "60"),
                     ("b-frames", "0"),
-                    ("target-usage", "7"),
+                    // 4 = balanced; 7 (fastest) looked grainy at high
+                    // resolutions for barely any latency gain.
+                    ("target-usage", "4"),
                 ],
             ),
             "nvh264enc" => element_desc(
                 name,
                 &[
-                    ("preset", "p1"),
+                    // p4 = balanced quality; p1 (fastest) looked grainy at
+                    // 4K. Latency stays low thanks to the tune/zerolatency
+                    // settings and no B-frames.
+                    ("preset", "p4"),
                     ("tune", "ultra-low-latency"),
                     ("rc-mode", "cbr"),
                     ("bitrate", &br),
@@ -133,6 +138,40 @@ pub fn encoder(kind: EncoderKind, bitrate_kbps: u32) -> Result<(String, String)>
         "no usable H.264 encoder found (tried {candidates:?}). \
          Install gstreamer1-plugins-bad (VA-API/NVENC) or gstreamer1-plugins-ugly (x264)."
     ))
+}
+
+/// A bitrate that suits the frame size: about 12 Mbit/s at 1080p, rising
+/// more slowly than the pixel count (about 34 Mbit/s at 4K), within limits a
+/// home Wi-Fi network handles.
+pub fn auto_bitrate_kbps(width: u32, height: u32) -> u32 {
+    let pixels = (width as f64 * height as f64).max(1.0);
+    let ratio = pixels / (1920.0 * 1080.0);
+    ((12_000.0 * ratio.powf(0.75)) as u32).clamp(4_000, 50_000)
+}
+
+/// Which encoder to use and how; turned into a pipeline per viewer, because
+/// the bitrate depends on the frame size at the time.
+pub struct EncoderChoice {
+    pub kind: EncoderKind,
+    /// Fixed bitrate, or `None` for automatic.
+    pub bitrate_kbps: Option<u32>,
+    /// LINAUX_ENCODER override: replaces the encoder element entirely.
+    pub custom: Option<String>,
+}
+
+impl EncoderChoice {
+    /// Returns `(encoder name, viewer pipeline description, bitrate)`.
+    pub fn viewer_pipeline(&self, width: u32, height: u32) -> Result<(String, String, u32)> {
+        let kbps = self.bitrate_kbps.unwrap_or_else(|| auto_bitrate_kbps(width, height));
+        let (name, desc) = match &self.custom {
+            Some(custom) => (
+                custom.split_whitespace().next().unwrap_or_default().to_owned(),
+                custom.clone(),
+            ),
+            None => encoder(self.kind, kbps)?,
+        };
+        Ok((name, viewer_desc(&desc), kbps))
+    }
 }
 
 /// Pipeline description for one viewer: takes NV12 frames from the capture
@@ -473,6 +512,14 @@ impl CaptureHub {
         id
     }
 
+    /// The size of the frames currently being captured, once known.
+    pub fn frame_size(&self) -> Option<(u32, u32)> {
+        let last = self.shared.last.lock().unwrap();
+        let caps = last.as_ref()?.caps()?;
+        let s = caps.structure(0)?;
+        Some((s.get::<i32>("width").ok()? as u32, s.get::<i32>("height").ok()? as u32))
+    }
+
     /// Test pattern only: change the frame size, as if the monitor resized.
     /// Returns false if this isn't the test source.
     pub fn resize_test_pattern(&self, width: u32, height: u32) -> bool {
@@ -614,5 +661,21 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.hub.unsubscribe(self.subscription);
         let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_bitrate_kbps;
+
+    #[test]
+    fn auto_bitrate_scales_with_size() {
+        assert_eq!(auto_bitrate_kbps(1920, 1080), 12_000);
+        let uhd = auto_bitrate_kbps(3840, 2160);
+        assert!((33_000..36_000).contains(&uhd), "{uhd}");
+        let phone = auto_bitrate_kbps(3120, 1440);
+        assert!(phone > 12_000 && phone < uhd, "{phone}");
+        assert_eq!(auto_bitrate_kbps(320, 240), 4_000);
+        assert_eq!(auto_bitrate_kbps(7680, 4320), 50_000);
     }
 }

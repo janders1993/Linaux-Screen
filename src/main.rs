@@ -54,9 +54,10 @@ struct Args {
     #[arg(short, long, value_enum, default_value_t = EncoderKind::Auto)]
     encoder: EncoderKind,
 
-    /// Video bitrate in kbit/s
-    #[arg(short, long, default_value_t = 8000)]
-    bitrate: u32,
+    /// Video bitrate in kbit/s [default: automatic, from the resolution:
+    /// about 12000 at 1080p, 34000 at 4K]
+    #[arg(short, long)]
+    bitrate: Option<u32>,
 
     /// Frame rate to ask the compositor for (0 = let it decide)
     #[arg(long, default_value_t = 60)]
@@ -122,15 +123,12 @@ async fn main() -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    let (mut encoder_name, mut encoder_desc) = stream::encoder(args.encoder, args.bitrate)?;
     // Debug: LINAUX_ENCODER replaces the encoder element and its settings,
     // e.g. LINAUX_ENCODER="nvh264enc" to try driver defaults.
-    if let Ok(custom) = std::env::var("LINAUX_ENCODER") {
-        if !custom.trim().is_empty() {
-            encoder_name = custom.split_whitespace().next().unwrap_or_default().to_owned();
-            encoder_desc = custom;
-        }
-    }
+    let custom = std::env::var("LINAUX_ENCODER").ok().filter(|c| !c.trim().is_empty());
+    let encoder_choice = stream::EncoderChoice { kind: args.encoder, bitrate_kbps: args.bitrate, custom };
+    // Check an encoder is available now rather than when a device connects.
+    let (encoder_name, _, _) = encoder_choice.viewer_pipeline(1920, 1080)?;
     tracing::info!("using encoder {encoder_name}");
 
     // Held until exit: dropping it ends the screencast and removes the
@@ -173,8 +171,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let hub = std::sync::Arc::new(stream::CaptureHub::start(&source, args.fps, args.dmabuf)?);
-    let desc = stream::viewer_desc(&encoder_desc);
-    tracing::debug!("viewer pipeline: {desc}");
 
     let ip = lan_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "<this-pc-ip>".into());
     let address = format!("http://{ip}:{}", args.port);
@@ -193,7 +189,7 @@ async fn main() -> Result<()> {
 
     let mut exit_rx = control.exit.subscribe();
     let why = tokio::select! {
-        result = server::run(listener, control.clone(), desc, encoder_name, hub.clone(), virtual_display) => {
+        result = server::run(listener, control.clone(), encoder_choice, hub.clone(), virtual_display) => {
             result?;
             Exit::Stop
         }

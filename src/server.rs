@@ -15,16 +15,15 @@ use tokio::sync::{mpsc, watch};
 
 use crate::control::Control;
 use crate::display::{self, VirtualDisplay};
-use crate::stream::{CaptureHub, Session, Signal};
+use crate::stream::{CaptureHub, EncoderChoice, Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
 
 struct AppState {
     control: Arc<Control>,
-    pipeline_desc: String,
+    encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
-    encoder_name: String,
     /// Bumped on every new connection. For the spike only one viewer streams
     /// at a time, so a new viewer takes over from the previous one.
     generation: watch::Sender<u64>,
@@ -33,17 +32,15 @@ struct AppState {
 pub async fn run(
     listener: tokio::net::TcpListener,
     control: Arc<Control>,
-    pipeline_desc: String,
-    encoder_name: String,
+    encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
 ) -> Result<()> {
     let state = Arc::new(AppState {
         control,
-        pipeline_desc,
+        encoder,
         hub,
         display,
-        encoder_name,
         generation: watch::Sender::new(0),
     });
 
@@ -87,9 +84,19 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<Signal>();
 
-    let _ = signal_tx.send(Signal::Info { encoder: state.encoder_name.clone() });
+    let (width, height) = state.hub.frame_size().unwrap_or((1920, 1080));
+    let (encoder_name, desc, kbps) = match state.encoder.viewer_pipeline(width, height) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("no encoder for {peer}: {e:#}");
+            return;
+        }
+    };
+    tracing::info!("streaming {width}x{height} to {peer} with {encoder_name} at {kbps} kbit/s");
+    tracing::debug!("viewer pipeline: {desc}");
+    let _ = signal_tx.send(Signal::Info { encoder: encoder_name });
 
-    let session = match Session::start(&state.pipeline_desc, signal_tx, state.hub.clone()) {
+    let session = match Session::start(&desc, signal_tx, state.hub.clone()) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("could not start stream for {peer}: {e:#}");
