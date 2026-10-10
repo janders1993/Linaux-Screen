@@ -187,18 +187,26 @@ pub fn capture_desc(source: &Source, fps: u32, dmabuf: bool) -> (String, String)
                 format!(",max-framerate=(fraction){{ {} }}", list.join(", "))
             };
 
+            // Stop downstream elements (encoder, GL upload) from negotiating
+            // the capture's buffer pool. Their small pool sizes get passed on
+            // to the compositor, which then waits for a free buffer and only
+            // manages a frame or two per second.
+            let isolate = element_desc("identity", &[("drop-allocation", "true")])
+                .map(|i| format!(" ! {i}"))
+                .unwrap_or_default();
+
             if dmabuf {
                 // Take frames as GPU buffers (DMA-BUF) instead of having the
                 // compositor copy them into system memory, which is very slow
                 // on some drivers (notably NVIDIA). Colour conversion then
                 // happens on the GPU via OpenGL.
                 (
-                    format!("{pw} name=capture ! video/x-raw(memory:DMABuf){rate}"),
+                    format!("{pw} name=capture ! video/x-raw(memory:DMABuf){rate}{isolate}"),
                     "glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! gldownload"
                         .to_owned(),
                 )
             } else {
-                (format!("{pw} name=capture ! video/x-raw{rate}"), videoconvert)
+                (format!("{pw} name=capture ! video/x-raw{rate}{isolate}"), videoconvert)
             }
         }
         Source::Test => {
@@ -218,7 +226,10 @@ pub fn capture_desc(source: &Source, fps: u32, dmabuf: bool) -> (String, String)
 /// compositor itself is delivering frames slowly.
 pub async fn run_capture_only(source: &Source, fps: u32, dmabuf: bool) -> Result<()> {
     let (src, _) = capture_desc(source, fps, dmabuf);
-    let desc = format!("{src} ! fakesink sync=false");
+    // Debug: LINAUX_CAPTURE_TAIL replaces the fakesink, to add pipeline
+    // stages one at a time and find which one slows capture down.
+    let tail = std::env::var("LINAUX_CAPTURE_TAIL").unwrap_or_else(|_| "fakesink sync=false".into());
+    let desc = format!("{src} ! {tail}");
     tracing::info!("capture-only pipeline: {desc}");
     let pipeline = gst::parse::launch(&desc)?
         .downcast::<gst::Pipeline>()
