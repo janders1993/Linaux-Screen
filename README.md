@@ -4,7 +4,7 @@ Turn any phone or tablet into a second monitor for your Linux desktop — no app
 
 The desktop runs a small service. Your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extended (or mirrored) display with touch, pen, keyboard and audio.
 
-> **Status:** spike (issue #1). A KDE virtual monitor streams to a phone browser at ~55 fps (tested on Bazzite, KDE Plasma, NVIDIA/NVENC). Display only for now; touch input is next (#2).
+> **Status:** working display. A KDE virtual monitor streams to a phone browser at ~55 fps with no noticeable delay (tested on Bazzite, KDE Plasma, NVIDIA/NVENC, Galaxy S22 Ultra). Display only — no touch input yet. Matching the monitor to the device's resolution and rotation is in progress (#4).
 
 ## Goals
 
@@ -19,12 +19,13 @@ The desktop runs a small service. Your iPad, iPhone or Android device opens `htt
 ## How it works
 
 ```
- KWin virtual output ──► PipeWire ──► GStreamer (VAAPI / NVENC H.264)
-                                            │
-                                         webrtcbin ──► browser on phone/tablet
-                                            ▲                  │
- RemoteDesktop portal / uinput  ◄── data channel ◄── pointer, pen, keys
+ KWin virtual output ──► PipeWire ──► capture pipeline (runs from launch)
+                                            │  NV12 frames
+                                            ▼
+                         per-device pipeline: NVENC / VA-API H.264 ──► WebRTC ──► browser
 ```
+
+Capture runs in its own pipeline for the life of the app and hands frames to one encoding pipeline per connected device. (Keeping them separate was the fix for KDE delivering ~1 fps — see issue #1.)
 
 | Piece | Technology |
 |---|---|
@@ -48,14 +49,13 @@ The desktop runs a small service. Your iPad, iPhone or Android device opens `htt
 
 ## Roadmap
 
-1. **Spike** — create a virtual monitor and stream it to a phone browser; measure latency.
-2. **Input** — touch as mouse, keyboard.
-3. **Polish** — audio, rotation, per-device resolution and scaling.
-4. **Pen** — pressure and tilt via uinput.
-5. **Multi-device** — several clients at once, QR-code pairing, Android USB.
-6. **Stretch** — video wall, iOS USB.
+Ordered by what matters most day to day; each step is a GitHub issue.
 
-Each step is tracked as a GitHub issue.
+- [x] **Spike** — virtual monitor streamed to a phone browser (#1)
+- [ ] **Match the device** — resolution, scaling and rotation follow the phone/tablet (#4, in progress)
+- [ ] **Polish** — fullscreen home-screen app (#9), run without a terminal (#8), audio (#3)
+- [ ] **More devices** — several at once with QR pairing (#6), Android over USB (#7)
+- [ ] **Later** — touch and keyboard input (#2), pen pressure (#5), video wall and iOS USB (#10)
 
 ## Building and running (spike)
 
