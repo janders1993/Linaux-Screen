@@ -13,6 +13,7 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 
+use crate::display::{self, VirtualDisplay};
 use crate::stream::{CaptureHub, Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
@@ -20,6 +21,7 @@ const VIEWER_HTML: &str = include_str!("../web/index.html");
 struct AppState {
     pipeline_desc: String,
     hub: Arc<CaptureHub>,
+    display: Option<Arc<VirtualDisplay>>,
     encoder_name: String,
     /// Bumped on every new connection. For the spike only one viewer streams
     /// at a time, so a new viewer takes over from the previous one.
@@ -31,16 +33,25 @@ pub async fn run(
     pipeline_desc: String,
     encoder_name: String,
     hub: Arc<CaptureHub>,
+    display: Option<Arc<VirtualDisplay>>,
 ) -> Result<()> {
     let state = Arc::new(AppState {
         pipeline_desc,
         hub,
+        display,
         encoder_name,
         generation: watch::Sender::new(0),
     });
 
     let app = Router::new()
-        .route("/", get(|| async { Html(VIEWER_HTML) }))
+        // no-store: phones otherwise keep showing an old copy of the viewer
+        // after the app is updated.
+        .route(
+            "/",
+            get(|| async {
+                ([(axum::http::header::CACHE_CONTROL, "no-store")], Html(VIEWER_HTML))
+            }),
+        )
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -91,6 +102,9 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
             }
             incoming = ws_rx.next() => match incoming {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<Signal>(&text) {
+                    Ok(Signal::Display { width, height, dpr }) => {
+                        resize_for(&state, peer, width, height, dpr);
+                    }
                     Ok(signal) => {
                         if let Err(e) = session.handle(signal) {
                             tracing::warn!("{peer}: {e:#}");
@@ -113,4 +127,39 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
 
     drop(session);
     tracing::info!("viewer {peer} disconnected");
+}
+
+/// Resizes the virtual monitor to suit the viewer's screen, in the background.
+fn resize_for(state: &AppState, peer: SocketAddr, width: u32, height: u32, dpr: f64) {
+    let (w, h, scale) = display::plan(width, height, dpr);
+    tracing::info!("{peer} screen is {width}x{height} @{dpr}x");
+    let Some(display) = state.display.clone() else {
+        if state.hub.resize_test_pattern(w, h) {
+            tracing::info!("test pattern resized to {w}x{h}");
+            // Reconnect like the real monitor does, so tests cover it.
+            let hub = state.hub.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = hub.restart() {
+                    tracing::error!("couldn't reconnect capture after resize: {e:#}");
+                }
+            });
+        }
+        return;
+    };
+    let hub = state.hub.clone();
+    tokio::spawn(async move {
+        match display.apply(w, h, scale).await {
+            Ok(true) => {
+                // Give KWin a moment to finish the mode change, then reconnect
+                // so the capture picks up the new size.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let result = tokio::task::spawn_blocking(move || hub.restart()).await;
+                if let Ok(Err(e)) = result {
+                    tracing::error!("couldn't reconnect capture after resize: {e:#}");
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!("couldn't resize the virtual monitor: {e:#}"),
+        }
+    });
 }

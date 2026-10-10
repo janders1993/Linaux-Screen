@@ -54,6 +54,7 @@ function connect() {
   clearTimeout(retryTimer);
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
+  lastDisplay = "";
   pc = new RTCPeerConnection({ iceServers: [] });
 
   pc.ontrack = (e) => {
@@ -95,9 +96,44 @@ function connect() {
     }
   };
 
+  ws.onopen = () => sendDisplay();
   ws.onclose = () => retry("Disconnected");
   ws.onerror = () => {};
 }
+
+// Tell the PC how much room the video has, in real pixels, so the virtual
+// monitor can match it exactly. That's the page area, not the whole screen:
+// in a normal browser tab the address and navigation bars take some, while in
+// fullscreen or a home-screen app it's the full screen. Rotating, entering
+// fullscreen or the bars appearing all fire a resize, which re-sends this.
+function displayInfo() {
+  const dpr = window.devicePixelRatio || 1;
+  const vv = window.visualViewport;
+  const w = vv ? vv.width * vv.scale : window.innerWidth;
+  const h = vv ? vv.height * vv.scale : window.innerHeight;
+  return {
+    type: "display",
+    width: Math.round(w * dpr),
+    height: Math.round(h * dpr),
+    dpr,
+  };
+}
+let lastDisplay = "";
+function sendDisplay() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const info = JSON.stringify(displayInfo());
+  if (info === lastDisplay) return;
+  lastDisplay = info;
+  ws.send(info);
+}
+let displayTimer = null;
+function displayChanged() {
+  clearTimeout(displayTimer);
+  // Wait for the rotation animation to settle before resizing the monitor.
+  displayTimer = setTimeout(sendDisplay, 600);
+}
+window.addEventListener("resize", displayChanged);
+if (screen.orientation) screen.orientation.addEventListener("change", displayChanged);
 
 function retry(reason) {
   if (retryTimer) return;

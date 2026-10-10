@@ -1,4 +1,5 @@
 mod capture;
+mod display;
 mod server;
 mod stream;
 
@@ -58,6 +59,12 @@ struct Args {
     #[arg(long)]
     dmabuf: bool,
 
+    /// Experimental: resize the virtual monitor to match the viewing device
+    /// and follow its rotation. Off by default: on KDE + NVIDIA the resizes
+    /// and capture reconnects hurt frame rate badly.
+    #[arg(long)]
+    fit_device: bool,
+
     /// Debug: only capture and count frames (no encoding or streaming)
     #[arg(long)]
     capture_only: bool,
@@ -100,9 +107,32 @@ async fn main() -> Result<()> {
 
     // Held until exit: dropping it ends the screencast and removes the
     // virtual monitor.
+    let resize = args.source == SourceKind::Virtual && args.pipewire_node.is_none() && args.fit_device;
+    // Note the existing outputs, so we can tell which one the portal adds.
+    let outputs_before = if resize {
+        match display::output_names().await {
+            Ok(names) => Some(names),
+            Err(e) => {
+                tracing::warn!("can't resize the virtual monitor to fit devices: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let capture = match (args.pipewire_node, args.source) {
         (Some(_), _) | (None, SourceKind::Test) => None,
         (None, kind) => Some(capture::start(kind).await?),
+    };
+    let virtual_display = match outputs_before {
+        Some(before) => match display::VirtualDisplay::find_new(&before).await {
+            Ok(d) => Some(std::sync::Arc::new(d)),
+            Err(e) => {
+                tracing::warn!("can't resize the virtual monitor to fit devices: {e:#}");
+                None
+            }
+        },
+        None => None,
     };
     let source = match (&capture, args.pipewire_node) {
         (Some(c), _) => stream::Source::PipeWire { fd: Some(c.pipewire_fd()), node_id: c.node_id },
@@ -123,7 +153,7 @@ async fn main() -> Result<()> {
     println!("\n  Open on your phone or tablet:  http://{ip}:{}\n", args.port);
 
     tokio::select! {
-        result = server::run(addr, desc, encoder_name, hub.clone()) => result?,
+        result = server::run(addr, desc, encoder_name, hub.clone(), virtual_display) => result?,
         _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
     }
 
