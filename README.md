@@ -14,7 +14,7 @@ You start the app on the PC, and your iPad, iPhone or Android device opens `http
 - **Audio** — desktop audio plays on the device.
 - **Zero install on clients** — any modern browser on iOS or Android; tap the video for fullscreen.
 - **Low latency** — hardware H.264 encoding, WebRTC transport, target under 60 ms on a good LAN.
-- **Later:** USB mode (Android via `adb reverse`, iOS via `iproxy`), multi-device video wall.
+- **Wireless only:** no USB mode; the point is several devices over Wi-Fi. A video wall is a stretch goal.
 
 ## How it works
 
@@ -51,9 +51,10 @@ Ordered by what matters most day to day; each step is a GitHub issue.
 
 - [x] **Spike** — virtual monitor streamed to a phone browser (#1)
 - [x] **Run without a terminal**: app-menu entry, tray icon, auto-stop (#8)
-- [ ] **Polish**: audio (#3)
-- [ ] **More devices** — several at once with QR pairing (#6), Android over USB (#7)
-- [ ] **Later** — match the monitor to the device (#4, experimental `--fit-device` flag), touch and keyboard input (#2), pen pressure (#5), video wall and iOS USB (#10)
+- [ ] **Audio**: desktop sound on the device (#3)
+- [ ] **Several devices at once**, e.g. phone and iPad together (#6)
+- [ ] **Input**: touchscreen tap/drag and iPad keyboard (#2), then pen pressure (#5)
+- [ ] **Later**: match the monitor to the device (#4, experimental `--fit-device` flag), video wall (#10)
 
 ## Setup
 
