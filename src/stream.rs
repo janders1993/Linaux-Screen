@@ -125,8 +125,12 @@ pub fn encoder(kind: EncoderKind, bitrate_kbps: u32) -> Result<(String, String)>
 }
 
 /// Full pipeline description for one viewer.
-pub fn pipeline_desc(source: &Source, encoder: &str, fps: u32) -> String {
-    let src = match source {
+pub fn pipeline_desc(source: &Source, encoder: &str, fps: u32, dmabuf: bool) -> String {
+    let videoconvert = element_desc("videoconvert", &[("n-threads", "4")])
+        .unwrap_or_else(|| "videoconvert".into());
+
+    // `src` ends in raw frames; `convert` turns them into NV12 in system memory.
+    let (src, convert) = match source {
         Source::PipeWire { fd, node_id } => {
             let fd_str = fd.map(|f| f.to_string());
             let mut props: Vec<(&str, &str)> = Vec::new();
@@ -135,45 +139,58 @@ pub fn pipeline_desc(source: &Source, encoder: &str, fps: u32) -> String {
             }
             let node = node_id.to_string();
             props.extend_from_slice(&[
-                    ("path", node.as_str()),
-                    ("do-timestamp", "true"),
-                    // Copy each frame out of the compositor's buffer straight
-                    // away. Without this we hold on to KWin's small buffer
-                    // pool and it can only send a new frame when one comes
-                    // back, which looks like ~1 fps.
-                    ("always-copy", "true"),
-                    // Re-send the last frame when the desktop is idle, so a
-                    // static screen doesn't stall the stream.
-                    ("keepalive-time", "1000"),
+                ("path", node.as_str()),
+                ("do-timestamp", "true"),
+                // Re-send the last frame when the desktop is idle, so a
+                // static screen doesn't stall the stream.
+                ("keepalive-time", "1000"),
             ]);
+            if !dmabuf {
+                // Copy each frame out of the compositor's buffer straight
+                // away, so we never hold on to its small buffer pool.
+                props.push(("always-copy", "true"));
+            }
             let pw = element_desc("pipewiresrc", &props)
                 .unwrap_or_else(|| format!("pipewiresrc path={node_id}"));
+
             // Screen capture lets us ask for a maximum frame rate. Left
             // open, GStreamer settles on the lowest the compositor offers
             // (about 1 fps). A list is tried in order, so the requested rate
             // wins and the others are fallbacks for odd refresh rates.
-            let caps = if fps == 0 {
-                "video/x-raw".to_owned()
+            let rate = if fps == 0 {
+                String::new()
             } else {
                 let mut rates = vec![fps, 60, 59, 50, 30];
                 rates.dedup();
                 let list: Vec<String> = rates.iter().map(|r| format!("{r}/1")).collect();
-                format!("video/x-raw,max-framerate=(fraction){{ {} }}", list.join(", "))
+                format!(",max-framerate=(fraction){{ {} }}", list.join(", "))
             };
-            format!("{pw} name=capture ! {caps}")
+
+            if dmabuf {
+                // Take frames as GPU buffers (DMA-BUF) instead of having the
+                // compositor copy them into system memory, which is very slow
+                // on some drivers (notably NVIDIA). Colour conversion then
+                // happens on the GPU via OpenGL.
+                (
+                    format!("{pw} name=capture ! video/x-raw(memory:DMABuf){rate}"),
+                    "glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! gldownload"
+                        .to_owned(),
+                )
+            } else {
+                (format!("{pw} name=capture ! video/x-raw{rate}"), videoconvert)
+            }
         }
         Source::Test => {
             let base = "videotestsrc name=capture is-live=true pattern=ball \
                  ! video/x-raw,width=1280,height=720,framerate=60/1";
             // A running clock makes latency easy to eyeball, if pango is installed.
-            match element_desc("timeoverlay", &[]) {
+            let src = match element_desc("timeoverlay", &[]) {
                 Some(overlay) => format!("{base} ! {overlay} font-desc=\"Sans 40\""),
                 None => base.to_owned(),
-            }
+            };
+            (src, videoconvert)
         }
     };
-    let convert = element_desc("videoconvert", &[("n-threads", "4")])
-        .unwrap_or_else(|| "videoconvert".into());
 
     format!(
         "{src} \

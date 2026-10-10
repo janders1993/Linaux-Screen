@@ -53,6 +53,11 @@ struct Args {
     #[arg(long, default_value_t = 60)]
     fps: u32,
 
+    /// Capture frames as GPU buffers (DMA-BUF) and convert on the GPU.
+    /// Much faster than the default on NVIDIA.
+    #[arg(long)]
+    dmabuf: bool,
+
     /// Debug: stream an existing PipeWire node instead of asking the portal
     #[arg(long, hide = true)]
     pipewire_node: Option<u32>,
@@ -92,7 +97,7 @@ async fn main() -> Result<()> {
         (None, Some(node_id)) => stream::Source::PipeWire { fd: None, node_id },
         (None, None) => stream::Source::Test,
     };
-    let desc = stream::pipeline_desc(&source, &encoder_desc, args.fps);
+    let desc = stream::pipeline_desc(&source, &encoder_desc, args.fps, args.dmabuf);
     tracing::debug!("pipeline: {desc}");
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), args.port);
