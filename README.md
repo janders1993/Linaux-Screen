@@ -98,10 +98,11 @@ distrobox enter linaux -- cp /usr/lib64/gstreamer-1.0/libgstnice.so ~/.local/sha
 ~/Linaux-Screen/scripts/install.sh --no-build
 ```
 
-This puts the app in `~/.local/bin` and adds **Linaux Screen** to the app menu. Nothing starts at login. To update later, pull and re-run the script without `--no-build`; it rebuilds in the box first:
+This puts the app in `~/.local/bin` and adds **Linaux Screen** to the app menu. Nothing starts at login. To update later, pull inside the box (that's where you're signed in to GitHub), then re-run the script without `--no-build`; it rebuilds in the box first:
 
 ```bash
-cd ~/Linaux-Screen && git pull && scripts/install.sh
+distrobox enter linaux -- bash -c 'cd ~/Linaux-Screen && git pull'
+~/Linaux-Screen/scripts/install.sh
 ```
 
 `scripts/install.sh --uninstall` removes it again.
