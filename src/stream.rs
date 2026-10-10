@@ -125,7 +125,7 @@ pub fn encoder(kind: EncoderKind, bitrate_kbps: u32) -> Result<(String, String)>
 }
 
 /// Full pipeline description for one viewer.
-pub fn pipeline_desc(source: &Source, encoder: &str) -> String {
+pub fn pipeline_desc(source: &Source, encoder: &str, fps: u32) -> String {
     let src = match source {
         Source::PipeWire { fd, node_id } => {
             let fd_str = fd.map(|f| f.to_string());
@@ -148,7 +148,19 @@ pub fn pipeline_desc(source: &Source, encoder: &str) -> String {
             ]);
             let pw = element_desc("pipewiresrc", &props)
                 .unwrap_or_else(|| format!("pipewiresrc path={node_id}"));
-            format!("{pw} name=capture ! video/x-raw")
+            // Screen capture lets us ask for a maximum frame rate. Left
+            // open, GStreamer settles on the lowest the compositor offers
+            // (about 1 fps). A list is tried in order, so the requested rate
+            // wins and the others are fallbacks for odd refresh rates.
+            let caps = if fps == 0 {
+                "video/x-raw".to_owned()
+            } else {
+                let mut rates = vec![fps, 60, 59, 50, 30];
+                rates.dedup();
+                let list: Vec<String> = rates.iter().map(|r| format!("{r}/1")).collect();
+                format!("video/x-raw,max-framerate=(fraction){{ {} }}", list.join(", "))
+            };
+            format!("{pw} name=capture ! {caps}")
         }
         Source::Test => {
             let base = "videotestsrc name=capture is-live=true pattern=ball \
@@ -260,6 +272,13 @@ impl Session {
         // and bad ones show up as seconds of delay and jerky playback.
         restamp_capture(&pipeline);
 
+        if let Some(pad) = pipeline.by_name("capture").and_then(|c| c.static_pad("src")) {
+            pad.connect_notify(Some("caps"), |pad, _| {
+                if let Some(caps) = pad.current_caps() {
+                    tracing::info!("capture format: {caps}");
+                }
+            });
+        }
         spawn_frame_counter(&pipeline);
 
         // We only send video; tell the browser not to bother sending any.

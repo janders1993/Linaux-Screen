@@ -49,6 +49,10 @@ struct Args {
     #[arg(short, long, default_value_t = 8000)]
     bitrate: u32,
 
+    /// Frame rate to ask the compositor for (0 = let it decide)
+    #[arg(long, default_value_t = 60)]
+    fps: u32,
+
     /// Debug: stream an existing PipeWire node instead of asking the portal
     #[arg(long, hide = true)]
     pipewire_node: Option<u32>,
@@ -88,7 +92,7 @@ async fn main() -> Result<()> {
         (None, Some(node_id)) => stream::Source::PipeWire { fd: None, node_id },
         (None, None) => stream::Source::Test,
     };
-    let desc = stream::pipeline_desc(&source, &encoder_desc);
+    let desc = stream::pipeline_desc(&source, &encoder_desc, args.fps);
     tracing::debug!("pipeline: {desc}");
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), args.port);
