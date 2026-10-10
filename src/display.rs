@@ -53,14 +53,23 @@ pub async fn output_names() -> Result<Vec<String>> {
     Ok(screen().await?.outputs.into_iter().map(|o| o.name).collect())
 }
 
-async fn kscreen(args: &[String]) -> Result<()> {
+/// Runs kscreen-doctor and returns its combined output.
+async fn kscreen_output(args: &[String]) -> Result<String> {
     tracing::debug!("kscreen-doctor {}", args.join(" "));
     let out = Command::new("kscreen-doctor").args(args).output().await?;
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     if !out.status.success() {
-        bail!("kscreen-doctor {} failed: {}", args.join(" "), stderr.trim());
+        bail!("kscreen-doctor {} failed: {}", args.join(" "), text.trim());
     }
-    Ok(())
+    Ok(text)
+}
+
+async fn kscreen(args: &[String]) -> Result<()> {
+    kscreen_output(args).await.map(|_| ())
 }
 
 /// Our virtual monitor, as kscreen-doctor knows it.
@@ -91,22 +100,48 @@ impl VirtualDisplay {
     /// `scale`.
     pub async fn apply(&self, width: u32, height: u32, scale: f64) -> Result<()> {
         let name = &self.name;
-        let mode_id = match self.find_mode(width, height).await? {
-            Some(id) => id,
-            None => {
-                kscreen(&[format!("output.{name}.addCustomMode.{width}.{height}.60000.full")]).await?;
-                self.find_mode(width, height)
-                    .await?
-                    .ok_or_else(|| anyhow!("{width}x{height} mode didn't appear after adding it"))?
+        let mut mode = self.find_mode(width, height).await?;
+        if mode.is_none() {
+            let out = kscreen_output(&[format!(
+                "output.{name}.addCustomMode.{width}.{height}.60000.full"
+            )])
+            .await?;
+            if !out.trim().is_empty() {
+                tracing::info!("kscreen-doctor addCustomMode said: {}", out.trim());
             }
-        };
-        kscreen(&[
-            format!("output.{name}.mode.{mode_id}"),
-            format!("output.{name}.scale.{scale}"),
-        ])
-        .await?;
+            // KWin can take a moment to publish the new mode.
+            for _ in 0..10 {
+                mode = self.find_mode(width, height).await?;
+                if mode.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+        // Fall back to selecting the mode by name if it never showed up in
+        // the mode list.
+        let mode = mode.unwrap_or_else(|| format!("{width}x{height}@60"));
+        if let Err(e) = kscreen(&[format!("output.{name}.mode.{mode}")]).await {
+            let available = self.mode_sizes().await.unwrap_or_default();
+            bail!("{e:#}. Modes KDE lists for this monitor: {available}");
+        }
+        kscreen(&[format!("output.{name}.scale.{scale}")]).await?;
         tracing::info!("virtual monitor set to {width}x{height} at scale {scale}");
         Ok(())
+    }
+
+    /// The monitor's modes, for error messages.
+    async fn mode_sizes(&self) -> Result<String> {
+        let screen = screen().await?;
+        let Some(output) = screen.outputs.into_iter().find(|o| o.name == self.name) else {
+            return Ok("(monitor not found)".into());
+        };
+        let list: Vec<String> = output
+            .modes
+            .iter()
+            .map(|m| format!("{}x{}@{:.0}", m.size.width, m.size.height, m.refresh_rate))
+            .collect();
+        Ok(if list.is_empty() { "(none)".into() } else { list.join(", ") })
     }
 
     /// The id of an existing mode with this size, preferring ~60 Hz.
