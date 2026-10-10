@@ -79,10 +79,18 @@ exit
 **Check the host has the runtime pieces** (in a normal Bazzite terminal):
 
 ```bash
-gst-inspect-1.0 webrtcbin nicesrc pipewiresrc dtlsenc srtpenc vah264enc nvh264enc x264enc 2>&1 | grep -E "^(Factory Details|No such element)" -A0
+for e in webrtcbin nicesrc pipewiresrc dtlsenc srtpenc vah264enc nvh264enc x264enc; do gst-inspect-1.0 $e >/dev/null 2>&1 && echo "OK      $e" || echo "MISSING $e"; done
 ```
 
 You need `webrtcbin`, `nicesrc`, `pipewiresrc`, `dtlsenc` and `srtpenc`, plus at least one encoder (`vah264enc` on AMD/Intel, `nvh264enc` on NVIDIA, or `x264enc`). If any are missing, open an issue with the output.
+
+Bazzite doesn't ship `nicesrc`. Copy it from the box into your user plugin folder (no reboot or layering needed):
+
+```bash
+distrobox enter linaux -- sudo dnf install -y libnice-gstreamer1
+mkdir -p ~/.local/share/gstreamer-1.0/plugins
+distrobox enter linaux -- cp /usr/lib64/gstreamer-1.0/libgstnice.so ~/.local/share/gstreamer-1.0/plugins/
+```
 
 **Run** (on the host):
 
