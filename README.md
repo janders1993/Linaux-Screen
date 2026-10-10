@@ -98,7 +98,9 @@ distrobox enter linaux -- cp /usr/lib64/gstreamer-1.0/libgstnice.so ~/.local/sha
 ~/Linaux-Screen/target/release/linaux-screen
 ```
 
-It prints a URL such as `http://192.168.1.20:4444`. Open it on your phone or tablet on the same Wi-Fi. KDE asks once to allow screen sharing, then a new monitor appears in **System Settings → Display**. Arrange it and set its resolution there.
+It prints a URL such as `http://192.168.1.20:4444`. Open it on your phone or tablet on the same Wi-Fi. KDE asks once to allow screen sharing, then a new monitor appears in **System Settings → Display**. Drag it to where you want it relative to your other screens.
+
+The virtual monitor automatically takes the connected device's resolution and pixel density, and flips between portrait and landscape when you rotate the device.
 
 Options:
 
@@ -108,6 +110,7 @@ Options:
 | `--encoder auto\|vaapi\|nvenc\|x264` | `auto` | H.264 encoder; `auto` tries VA-API, NVENC, then software |
 | `--bitrate <kbps>` | `8000` | Video bitrate |
 | `--port <n>` | `4444` | Port to serve on |
+| `--no-resize` | off | Keep KDE's default monitor size instead of matching the device |
 
 On the device: tap with **three fingers** (or press `s`) to show stats — resolution, fps, bitrate, buffer and decode time. On Android a tap goes fullscreen; on iPhone use **Share → Add to Home Screen**.
 

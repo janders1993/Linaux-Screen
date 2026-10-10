@@ -54,6 +54,7 @@ function connect() {
   clearTimeout(retryTimer);
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
+  lastDisplay = "";
   pc = new RTCPeerConnection({ iceServers: [] });
 
   pc.ontrack = (e) => {
@@ -95,9 +96,42 @@ function connect() {
     }
   };
 
+  ws.onopen = () => sendDisplay();
   ws.onclose = () => retry("Disconnected");
   ws.onerror = () => {};
 }
+
+// Tell the PC this device's screen size so the virtual monitor can match it.
+// Uses the full screen (not the browser window) in the current orientation,
+// in real pixels.
+function displayInfo() {
+  let w = screen.width, h = screen.height;
+  const portrait = matchMedia("(orientation: portrait)").matches;
+  if ((w > h) === portrait) [w, h] = [h, w];
+  const dpr = window.devicePixelRatio || 1;
+  return {
+    type: "display",
+    width: Math.round(w * dpr),
+    height: Math.round(h * dpr),
+    dpr,
+  };
+}
+let lastDisplay = "";
+function sendDisplay() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const info = JSON.stringify(displayInfo());
+  if (info === lastDisplay) return;
+  lastDisplay = info;
+  ws.send(info);
+}
+let displayTimer = null;
+function displayChanged() {
+  clearTimeout(displayTimer);
+  // Wait for the rotation animation to settle before resizing the monitor.
+  displayTimer = setTimeout(sendDisplay, 600);
+}
+window.addEventListener("resize", displayChanged);
+if (screen.orientation) screen.orientation.addEventListener("change", displayChanged);
 
 function retry(reason) {
   if (retryTimer) return;

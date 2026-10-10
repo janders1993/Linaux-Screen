@@ -30,6 +30,12 @@ pub enum Signal {
     Info {
         encoder: String,
     },
+    /// The viewer's screen in physical pixels, sent on connect and rotation.
+    Display {
+        width: u32,
+        height: u32,
+        dpr: f64,
+    },
 }
 
 /// Where the frames come from.
@@ -209,8 +215,10 @@ pub fn capture_desc(source: &Source, fps: u32, dmabuf: bool) -> (String, String)
             }
         }
         Source::Test => {
+            // Named so resize requests can change it, which exercises the
+            // same renegotiation path as the real virtual monitor resizing.
             let base = "videotestsrc name=capture is-live=true pattern=ball \
-                 ! video/x-raw,width=1280,height=720,framerate=60/1";
+                 ! capsfilter name=testcaps caps=video/x-raw,width=1280,height=720,framerate=60/1";
             // A running clock makes latency easy to eyeball, if pango is installed.
             let src = match element_desc("timeoverlay", &[]) {
                 Some(overlay) => format!("{base} ! {overlay} font-desc=\"Sans 40\""),
@@ -415,6 +423,19 @@ impl CaptureHub {
         }
         self.shared.viewers.lock().unwrap().push((id, appsrc));
         id
+    }
+
+    /// Test pattern only: change the frame size, as if the monitor resized.
+    /// Returns false if this isn't the test source.
+    pub fn resize_test_pattern(&self, width: u32, height: u32) -> bool {
+        let Some(filter) = self.pipeline.by_name("testcaps") else { return false };
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("width", width as i32)
+            .field("height", height as i32)
+            .field("framerate", gst::Fraction::new(60, 1))
+            .build();
+        filter.set_property("caps", caps);
+        true
     }
 
     fn unsubscribe(&self, id: u64) {

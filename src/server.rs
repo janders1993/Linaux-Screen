@@ -13,6 +13,7 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 
+use crate::display::{self, VirtualDisplay};
 use crate::stream::{CaptureHub, Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
@@ -20,6 +21,7 @@ const VIEWER_HTML: &str = include_str!("../web/index.html");
 struct AppState {
     pipeline_desc: String,
     hub: Arc<CaptureHub>,
+    display: Option<Arc<VirtualDisplay>>,
     encoder_name: String,
     /// Bumped on every new connection. For the spike only one viewer streams
     /// at a time, so a new viewer takes over from the previous one.
@@ -31,10 +33,12 @@ pub async fn run(
     pipeline_desc: String,
     encoder_name: String,
     hub: Arc<CaptureHub>,
+    display: Option<Arc<VirtualDisplay>>,
 ) -> Result<()> {
     let state = Arc::new(AppState {
         pipeline_desc,
         hub,
+        display,
         encoder_name,
         generation: watch::Sender::new(0),
     });
@@ -91,6 +95,9 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
             }
             incoming = ws_rx.next() => match incoming {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<Signal>(&text) {
+                    Ok(Signal::Display { width, height, dpr }) => {
+                        resize_for(&state, peer, width, height, dpr);
+                    }
                     Ok(signal) => {
                         if let Err(e) = session.handle(signal) {
                             tracing::warn!("{peer}: {e:#}");
@@ -113,4 +120,21 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
 
     drop(session);
     tracing::info!("viewer {peer} disconnected");
+}
+
+/// Resizes the virtual monitor to suit the viewer's screen, in the background.
+fn resize_for(state: &AppState, peer: SocketAddr, width: u32, height: u32, dpr: f64) {
+    let (w, h, scale) = display::plan(width, height, dpr);
+    tracing::info!("{peer} screen is {width}x{height} @{dpr}x");
+    let Some(display) = state.display.clone() else {
+        if state.hub.resize_test_pattern(w, h) {
+            tracing::info!("test pattern resized to {w}x{h}");
+        }
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(e) = display.apply(w, h, scale).await {
+            tracing::warn!("couldn't resize the virtual monitor: {e:#}");
+        }
+    });
 }
