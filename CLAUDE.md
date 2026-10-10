@@ -4,14 +4,19 @@ Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet
 
 ## Layout
 
-- `src/main.rs` — CLI flags, startup, prints the LAN URL
+- `src/main.rs` — CLI flags, startup (single-instance via the port, log file), shutdown/restart (restart = exec self)
+- `src/control.rs` — shared state: connected viewers, disconnect-all, exit requests; auto-stop countdown (starts only after a device has connected and the last one left)
+- `src/tray.rs` — ksni tray icon (status, copy address, restart, disconnect all, stop); `src/desktop.rs` — notifications + clipboard over D-Bus
+- `scripts/install.sh` — host-side install: binary to ~/.local/bin + `io.github.janders1993.LinauxScreen.desktop`
 - `src/capture.rs` — xdg-desktop-portal ScreenCast via `ashpd` (virtual monitor or mirror); stores a restore token in `~/.config/linaux-screen/`
 - `src/stream.rs` — `CaptureHub`: one long-running capture pipeline (pipewiresrc → NV12 → appsink) started at launch; each viewer `Session` is its own pipeline (appsrc → H.264 → rtph264pay → webrtcbin) fed by the hub. Also signalling message types and debug modes (`--capture-only`, `LINAUX_*` env overrides)
 - `src/display.rs` — (opt-in via `--fit-device`, experimental: killed fps on KDE+NVIDIA) resizes the virtual monitor to the viewer's screen via `kscreen-doctor` (finds our output by diffing outputs before/after the portal starts; adds a custom mode, sets mode + scale)
-- `src/server.rs` — axum: `/` serves the viewer, `/ws` does signalling; one streaming viewer at a time (newest wins)
+- `src/server.rs` — axum: `/` serves the viewer, `/ws` does signalling; one streaming viewer at a time (newest wins); sends `bye` on disconnect-all/stop so viewers don't auto-retry
 - `web/index.html` — the viewer, embedded into the binary with `include_str!`
 
 ## Conventions
+
+- Starting is always a deliberate user action (app menu); never auto-start at login or on connection.
 
 - Keep capture in its own pipeline. Capture inside the per-viewer WebRTC pipeline ran at ~1 fps on KWin; separate, it runs at full rate. Also: no `keepalive-time` on pipewiresrc (throttled KWin to ~1 fps), and always request `max-framerate` (otherwise ~1 fps).
 

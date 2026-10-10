@@ -13,33 +13,34 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 
+use crate::control::Control;
 use crate::display::{self, VirtualDisplay};
-use crate::stream::{CaptureHub, Session, Signal};
+use crate::stream::{CaptureHub, EncoderChoice, Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
 
 struct AppState {
-    pipeline_desc: String,
+    control: Arc<Control>,
+    encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
-    encoder_name: String,
     /// Bumped on every new connection. For the spike only one viewer streams
     /// at a time, so a new viewer takes over from the previous one.
     generation: watch::Sender<u64>,
 }
 
 pub async fn run(
-    addr: SocketAddr,
-    pipeline_desc: String,
-    encoder_name: String,
+    listener: tokio::net::TcpListener,
+    control: Arc<Control>,
+    encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
 ) -> Result<()> {
     let state = Arc::new(AppState {
-        pipeline_desc,
+        control,
+        encoder,
         hub,
         display,
-        encoder_name,
         generation: watch::Sender::new(0),
     });
 
@@ -55,7 +56,6 @@ pub async fn run(
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
@@ -70,6 +70,9 @@ async fn ws_handler(
 
 async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>) {
     tracing::info!("viewer connected from {peer}");
+    let _registered = state.control.viewer_connected(peer);
+    let mut kick_rx = state.control.kick.subscribe();
+    let mut exit_rx = state.control.exit.subscribe();
 
     let mut my_generation = 0;
     state.generation.send_modify(|g| {
@@ -81,9 +84,19 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<Signal>();
 
-    let _ = signal_tx.send(Signal::Info { encoder: state.encoder_name.clone() });
+    let (width, height) = state.hub.frame_size().unwrap_or((1920, 1080));
+    let (encoder_name, desc, kbps) = match state.encoder.viewer_pipeline(width, height) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("no encoder for {peer}: {e:#}");
+            return;
+        }
+    };
+    tracing::info!("streaming {width}x{height} to {peer} with {encoder_name} at {kbps} kbit/s");
+    tracing::debug!("viewer pipeline: {desc}");
+    let _ = signal_tx.send(Signal::Info { encoder: encoder_name });
 
-    let session = match Session::start(&state.pipeline_desc, signal_tx, state.hub.clone()) {
+    let session = match Session::start(&desc, signal_tx, state.hub.clone()) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("could not start stream for {peer}: {e:#}");
@@ -92,8 +105,25 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
         }
     };
 
+    // Tells the viewer we're closing on purpose, so it doesn't keep retrying.
+    async fn say_bye(ws_tx: &mut futures::stream::SplitSink<WebSocket, Message>, reason: &str) {
+        if let Ok(text) = serde_json::to_string(&Signal::Bye { reason: reason.into() }) {
+            let _ = ws_tx.send(Message::Text(text.into())).await;
+        }
+        let _ = ws_tx.send(Message::Close(None)).await;
+    }
+
     loop {
         tokio::select! {
+            Ok(()) = kick_rx.changed() => {
+                tracing::info!("disconnecting {peer} (disconnect all)");
+                say_bye(&mut ws_tx, "disconnected").await;
+                break;
+            }
+            Ok(()) = exit_rx.changed() => {
+                say_bye(&mut ws_tx, "stopped").await;
+                break;
+            }
             Some(signal) = signal_rx.recv() => {
                 let Ok(text) = serde_json::to_string(&signal) else { continue };
                 if ws_tx.send(Message::Text(text.into())).await.is_err() {

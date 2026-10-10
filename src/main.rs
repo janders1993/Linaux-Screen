@@ -1,12 +1,20 @@
 mod capture;
+mod control;
+mod desktop;
 mod display;
 mod server;
 mod stream;
+mod tray;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
+
+use control::Exit;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum SourceKind {
@@ -46,9 +54,10 @@ struct Args {
     #[arg(short, long, value_enum, default_value_t = EncoderKind::Auto)]
     encoder: EncoderKind,
 
-    /// Video bitrate in kbit/s
-    #[arg(short, long, default_value_t = 8000)]
-    bitrate: u32,
+    /// Video bitrate in kbit/s [default: automatic, from the resolution:
+    /// about 12000 at 1080p, 34000 at 4K]
+    #[arg(short, long)]
+    bitrate: Option<u32>,
 
     /// Frame rate to ask the compositor for (0 = let it decide)
     #[arg(long, default_value_t = 60)]
@@ -64,6 +73,15 @@ struct Args {
     /// and capture reconnects hurt frame rate badly.
     #[arg(long)]
     fit_device: bool,
+
+    /// Stop this long after the last device disconnects (seconds; 0 = never).
+    /// The countdown only starts once a device has connected and left.
+    #[arg(long, default_value_t = 60)]
+    idle_timeout: u64,
+
+    /// Don't show a system tray icon
+    #[arg(long)]
+    no_tray: bool,
 
     /// Debug: only capture and count frames (no encoding or streaming)
     #[arg(long)]
@@ -84,25 +102,33 @@ fn lan_ip() -> Option<IpAddr> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "linaux_screen=info".into()),
-        )
-        .init();
-
+    init_logging();
     let args = Args::parse();
     gst::init()?;
 
-    let (mut encoder_name, mut encoder_desc) = stream::encoder(args.encoder, args.bitrate)?;
+    // Claim the port before anything else. If it's taken, the app is almost
+    // certainly already running (e.g. launched twice from the app menu).
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), args.port);
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && !args.capture_only => {
+            tracing::warn!("port {} is in use; is Linaux Screen already running?", args.port);
+            desktop::notify(
+                "Already running",
+                "Linaux Screen is already running. Use its tray icon to restart or stop it.",
+            )
+            .await;
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+
     // Debug: LINAUX_ENCODER replaces the encoder element and its settings,
     // e.g. LINAUX_ENCODER="nvh264enc" to try driver defaults.
-    if let Ok(custom) = std::env::var("LINAUX_ENCODER") {
-        if !custom.trim().is_empty() {
-            encoder_name = custom.split_whitespace().next().unwrap_or_default().to_owned();
-            encoder_desc = custom;
-        }
-    }
+    let custom = std::env::var("LINAUX_ENCODER").ok().filter(|c| !c.trim().is_empty());
+    let encoder_choice = stream::EncoderChoice { kind: args.encoder, bitrate_kbps: args.bitrate, custom };
+    // Check an encoder is available now rather than when a device connects.
+    let (encoder_name, _, _) = encoder_choice.viewer_pipeline(1920, 1080)?;
     tracing::info!("using encoder {encoder_name}");
 
     // Held until exit: dropping it ends the screencast and removes the
@@ -145,19 +171,89 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let hub = std::sync::Arc::new(stream::CaptureHub::start(&source, args.fps, args.dmabuf)?);
-    let desc = stream::viewer_desc(&encoder_desc);
-    tracing::debug!("viewer pipeline: {desc}");
 
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), args.port);
     let ip = lan_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "<this-pc-ip>".into());
-    println!("\n  Open on your phone or tablet:  http://{ip}:{}\n", args.port);
+    let address = format!("http://{ip}:{}", args.port);
+    println!("\n  Open on your phone or tablet:  {address}\n");
 
-    tokio::select! {
-        result = server::run(addr, desc, encoder_name, hub.clone(), virtual_display) => result?,
-        _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
+    let control = Arc::new(control::Control::new(address.clone()));
+    if !args.no_tray {
+        tokio::spawn(tray::run(control.clone()));
     }
+    if args.idle_timeout > 0 {
+        let c = control.clone();
+        let timeout = Duration::from_secs(args.idle_timeout);
+        tokio::spawn(async move { control::run_auto_stop(&c, timeout).await });
+    }
+    desktop::notify("Second screen ready", &format!("Open {address} on your phone or tablet")).await;
 
+    let mut exit_rx = control.exit.subscribe();
+    let why = tokio::select! {
+        result = server::run(listener, control.clone(), encoder_choice, hub.clone(), virtual_display) => {
+            result?;
+            Exit::Stop
+        }
+        _ = tokio::signal::ctrl_c() => Exit::Stop,
+        _ = exit_rx.wait_for(|e| e.is_some()) => control.exit.borrow().unwrap_or(Exit::Stop),
+    };
+    tracing::info!("shutting down ({why:?})");
+    // Let connected viewers know (so they don't keep retrying), then give the
+    // messages a moment to go out before the server disappears.
+    control.request_exit(why);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Dropping these ends the screencast, which removes the virtual monitor.
     drop(hub);
     drop(capture);
+
+    match why {
+        Exit::Restart => restart(),
+        Exit::Idle => {
+            desktop::notify("Second screen stopped", "No device was connected for a while.").await;
+        }
+        Exit::Stop => {}
+    }
     Ok(())
+}
+
+/// Replaces this process with a fresh copy of the app, same arguments.
+/// Picks up a newly installed binary too.
+fn restart() {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe()
+        .map(|p| {
+            // After an update the running binary shows as "... (deleted)".
+            let s = p.to_string_lossy().trim_end_matches(" (deleted)").to_owned();
+            std::path::PathBuf::from(s)
+        })
+        .unwrap_or_else(|_| "linaux-screen".into());
+    tracing::info!("restarting");
+    let err = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    tracing::error!("couldn't restart: {err}");
+}
+
+/// Logs to the terminal and to `~/.local/state/linaux-screen/linaux-screen.log`
+/// (replaced on each start), so there's a log even when started from the app
+/// menu.
+fn init_logging() {
+    use tracing_subscriber::prelude::*;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "linaux_screen=info".into());
+    let file = dirs::state_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local/state")))
+        .map(|d| d.join("linaux-screen"))
+        .and_then(|dir| {
+            std::fs::create_dir_all(&dir).ok()?;
+            std::fs::File::create(dir.join("linaux-screen.log")).ok()
+        });
+    let file_layer = file.map(|f| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(f))
+    });
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(file_layer)
+        .init();
 }
