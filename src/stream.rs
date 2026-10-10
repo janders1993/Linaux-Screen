@@ -126,11 +126,26 @@ pub fn encoder(kind: EncoderKind, bitrate_kbps: u32) -> Result<(String, String)>
 
 /// Full pipeline description for one viewer.
 pub fn pipeline_desc(source: &Source, encoder: &str, fps: u32, dmabuf: bool) -> String {
+    let (src, convert) = capture_desc(source, fps, dmabuf);
+    format!(
+        "{src} \
+         ! queue max-size-buffers=1 leaky=downstream \
+         ! {convert} ! video/x-raw,format=NV12 \
+         ! {encoder} \
+         ! h264parse name=parse \
+         ! rtph264pay name=pay config-interval=-1 aggregate-mode=zero-latency \
+         ! application/x-rtp,media=video,encoding-name=H264,payload=96 \
+         ! webrtcbin name=webrtc bundle-policy=max-bundle"
+    )
+}
+
+/// Returns `(source, convert)`: `source` ends in raw frames named `capture`;
+/// `convert` turns them into NV12 in system memory.
+pub fn capture_desc(source: &Source, fps: u32, dmabuf: bool) -> (String, String) {
     let videoconvert = element_desc("videoconvert", &[("n-threads", "4")])
         .unwrap_or_else(|| "videoconvert".into());
 
-    // `src` ends in raw frames; `convert` turns them into NV12 in system memory.
-    let (src, convert) = match source {
+    match source {
         Source::PipeWire { fd, node_id } => {
             let fd_str = fd.map(|f| f.to_string());
             let mut props: Vec<(&str, &str)> = Vec::new();
@@ -152,6 +167,12 @@ pub fn pipeline_desc(source: &Source, encoder: &str, fps: u32, dmabuf: bool) -> 
             }
             let pw = element_desc("pipewiresrc", &props)
                 .unwrap_or_else(|| format!("pipewiresrc path={node_id}"));
+            // Debug escape hatch: extra pipewiresrc properties, e.g.
+            // LINAUX_PW_PROPS="always-copy=false keepalive-time=0".
+            let pw = match std::env::var("LINAUX_PW_PROPS") {
+                Ok(extra) if !extra.trim().is_empty() => format!("{pw} {extra}"),
+                _ => pw,
+            };
 
             // Screen capture lets us ask for a maximum frame rate. Left
             // open, GStreamer settles on the lowest the compositor offers
@@ -190,18 +211,44 @@ pub fn pipeline_desc(source: &Source, encoder: &str, fps: u32, dmabuf: bool) -> 
             };
             (src, videoconvert)
         }
-    };
+    }
+}
 
-    format!(
-        "{src} \
-         ! queue max-size-buffers=1 leaky=downstream \
-         ! {convert} ! video/x-raw,format=NV12 \
-         ! {encoder} \
-         ! h264parse name=parse \
-         ! rtph264pay name=pay config-interval=-1 aggregate-mode=zero-latency \
-         ! application/x-rtp,media=video,encoding-name=H264,payload=96 \
-         ! webrtcbin name=webrtc bundle-policy=max-bundle"
-    )
+/// Debug mode: capture and count frames, nothing else. Shows whether the
+/// compositor itself is delivering frames slowly.
+pub async fn run_capture_only(source: &Source, fps: u32, dmabuf: bool) -> Result<()> {
+    let (src, _) = capture_desc(source, fps, dmabuf);
+    let desc = format!("{src} ! fakesink sync=false");
+    tracing::info!("capture-only pipeline: {desc}");
+    let pipeline = gst::parse::launch(&desc)?
+        .downcast::<gst::Pipeline>()
+        .map_err(|_| anyhow!("not a pipeline"))?;
+    if let Some(pad) = pipeline.by_name("capture").and_then(|c| c.static_pad("src")) {
+        pad.connect_notify(Some("caps"), |pad, _| {
+            if let Some(caps) = pad.current_caps() {
+                tracing::info!("capture format: {caps}");
+            }
+        });
+    }
+    spawn_frame_counter(&pipeline);
+    pipeline.set_state(gst::State::Playing)?;
+    println!("\n  Capture-only mode: move windows on the captured screen, Ctrl+C to stop.\n");
+    let bus = pipeline.bus().context("no bus")?;
+    let mut messages = bus.stream();
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            msg = messages.next() => match msg {
+                Some(msg) => if let gst::MessageView::Error(e) = msg.view() {
+                    tracing::error!("{} ({:?})", e.error(), e.debug());
+                    break;
+                },
+                None => break,
+            }
+        }
+    }
+    pipeline.set_state(gst::State::Null)?;
+    Ok(())
 }
 
 fn restamp_capture(pipeline: &gst::Pipeline) {
@@ -251,9 +298,8 @@ fn spawn_frame_counter(pipeline: &gst::Pipeline) {
         });
         Some(counter)
     };
-    let (Some(captured), Some(sent)) = (count("capture"), count("parse")) else {
-        return;
-    };
+    let Some(captured) = count("capture") else { return };
+    let sent = count("parse");
     let weak = pipeline.downgrade();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -261,8 +307,13 @@ fn spawn_frame_counter(pipeline: &gst::Pipeline) {
         while weak.upgrade().is_some() {
             tick.tick().await;
             let c = captured.swap(0, Ordering::Relaxed) as f64 / 5.0;
-            let e = sent.swap(0, Ordering::Relaxed) as f64 / 5.0;
-            tracing::info!("capture {c:.1} fps, encoded {e:.1} fps");
+            match &sent {
+                Some(sent) => {
+                    let e = sent.swap(0, Ordering::Relaxed) as f64 / 5.0;
+                    tracing::info!("capture {c:.1} fps, encoded {e:.1} fps");
+                }
+                None => tracing::info!("capture {c:.1} fps"),
+            }
         }
     });
 }

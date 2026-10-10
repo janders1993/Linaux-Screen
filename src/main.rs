@@ -58,6 +58,10 @@ struct Args {
     #[arg(long)]
     dmabuf: bool,
 
+    /// Debug: only capture and count frames (no encoding or streaming)
+    #[arg(long)]
+    capture_only: bool,
+
     /// Debug: stream an existing PipeWire node instead of asking the portal
     #[arg(long, hide = true)]
     pipewire_node: Option<u32>,
@@ -97,6 +101,11 @@ async fn main() -> Result<()> {
         (None, Some(node_id)) => stream::Source::PipeWire { fd: None, node_id },
         (None, None) => stream::Source::Test,
     };
+    if args.capture_only {
+        stream::run_capture_only(&source, args.fps, args.dmabuf).await?;
+        drop(capture);
+        return Ok(());
+    }
     let desc = stream::pipeline_desc(&source, &encoder_desc, args.fps, args.dmabuf);
     tracing::debug!("pipeline: {desc}");
 
