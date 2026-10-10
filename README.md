@@ -67,7 +67,7 @@ Bazzite is immutable, so build inside a Fedora distrobox (matching Bazzite's Fed
 distrobox create --name linaux --image registry.fedoraproject.org/fedora:$(rpm -E %fedora)
 distrobox enter linaux
 
-sudo dnf install -y gcc pkgconf-pkg-config dbus-devel \
+sudo dnf install -y git gh gcc pkgconf-pkg-config dbus-devel \
   gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-bad-free-devel
 curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y && source ~/.cargo/env
 
