@@ -31,8 +31,16 @@ pub enum Signal {
     Info {
         encoder: String,
     },
+    /// How many devices are watching, sent whenever it changes.
+    Viewers {
+        count: usize,
+    },
+    /// The viewer says what kind of device it is ("iPad", …), for the tray.
+    Hello {
+        device: String,
+    },
     /// Server is closing this connection on purpose; the viewer shouldn't
-    /// reconnect by itself. `reason` is "disconnected" or "stopped".
+    /// reconnect by itself. `reason` is "disconnected", "stopped" or "full".
     Bye {
         reason: String,
     },

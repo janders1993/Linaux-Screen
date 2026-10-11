@@ -52,7 +52,7 @@ Ordered by what matters most day to day; each step is a GitHub issue.
 - [x] **Spike** — virtual monitor streamed to a phone browser (#1)
 - [x] **Run without a terminal**: app-menu entry, tray icon, auto-stop (#8)
 - [ ] **Audio**: desktop sound on the device (#3)
-- [ ] **Several devices at once**, e.g. phone and iPad together (#6)
+- [x] **Several devices at once**: all mirror the same screen (#6)
 - [ ] **Input**: touchscreen tap/drag and iPad keyboard (#2), then pen pressure (#5)
 - [ ] **Later**: match the monitor to the device (#4, experimental `--fit-device` flag), video wall (#10)
 
@@ -112,7 +112,9 @@ distrobox enter linaux -- bash -c 'cd ~/Linaux-Screen && git pull'
 2. **On the phone or tablet,** open the address, e.g. `http://192.168.1.20:4444`. Saving it as a home-screen bookmark makes this one tap. Tap the video for fullscreen (Android).
 3. **When you're done,** just close the page or put the device down. A minute after the last device disconnects, the app stops by itself and the virtual monitor disappears. Nothing counts down while it's waiting for the first device.
 
-The **tray menu** shows who's connected, and has:
+Several devices can watch at once (up to four). They all see the same screen, each scaled to fit with black bars where the shapes differ.
+
+The **tray menu** shows who's connected, e.g. *iPad (192.168.1.120)*, and has:
 - **Copy address**
 - **Restart**: also picks up a newly installed version.
 - **Disconnect all devices**: they show "tap to reconnect".
@@ -122,7 +124,7 @@ A new monitor appears in **System Settings → Display** while it runs. Drag it 
 
 The virtual monitor starts at 1920×1080, letterboxed on the device. You can change its resolution and scale in **System Settings → Display Configuration** (it's listed as *Virtual Output*). KDE remembers the setting, so it's applied every time the app starts. `--fit-device` (experimental) resizes it automatically to match the device and follows rotation, but resizing mid-stream costs a lot of frame rate on KDE + NVIDIA (#4).
 
-On the device: tap with **three fingers** (or press `s`) to show stats: resolution, fps, bitrate, buffer and decode time.
+On the device: tap with **three fingers** (or press `s`) to show stats: resolution, fps, bitrate, buffer and decode time, and how many devices are connected.
 
 **Running from a terminal** works too: `linaux-screen` (with any options below). Logs always go to `~/.local/state/linaux-screen/linaux-screen.log`.
 

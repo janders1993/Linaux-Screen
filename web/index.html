@@ -51,6 +51,7 @@ const hud = document.getElementById("hud");
 let pc = null;
 let ws = null;
 let encoder = "?";
+let devices = 0;
 let retryTimer = null;
 let failures = 0;
 // Set when the PC closes the connection on purpose: "disconnected" (from its
@@ -108,20 +109,42 @@ function connect() {
       ended = msg.reason;
       try { pc && pc.close(); } catch (_) {}
       video.srcObject = null;
-      if (ended === "disconnected") setStatus("Disconnected from the PC. Tap to reconnect.");
+      if (ended === "full") {
+        setStatus("Too many devices are already watching. Tap to try again.");
+        ended = "disconnected";  // wait for a tap, like disconnect-all
+      } else if (ended === "disconnected") setStatus("Disconnected from the PC. Tap to reconnect.");
       else setStatus("Stopped on the PC. This page reconnects by itself when it's started again.");
+    } else if (msg.type === "viewers") {
+      devices = msg.count;
     } else if (msg.type === "info") {
       encoder = msg.encoder;
     }
   };
 
-  ws.onopen = () => { ended = null; sendDisplay(); };
+  ws.onopen = () => {
+    ended = null;
+    ws.send(JSON.stringify({ type: "hello", device: deviceName() }));
+    sendDisplay();
+  };
   ws.onclose = () => {
     if (ended === "disconnected") return;  // wait for a tap
     if (ended === "stopped") { retry(null, 5000); return; }
     retry("Disconnected");
   };
   ws.onerror = () => {};
+}
+
+// A friendly name for the tray on the PC, e.g. "iPad (192.168.1.120)".
+// iPads report themselves as a Mac, so a touch screen gives them away.
+function deviceName() {
+  const ua = navigator.userAgent;
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return "iPad";
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/Android/.test(ua)) return /Mobile/.test(ua) ? "Android phone" : "Android tablet";
+  if (/Windows/.test(ua)) return "Windows PC";
+  if (/Macintosh/.test(ua)) return "Mac";
+  if (/Linux/.test(ua)) return "Linux PC";
+  return "Browser";
 }
 
 // Tell the PC how much room the video has, in real pixels, so the virtual
@@ -205,7 +228,8 @@ setInterval(async () => {
       `${r.frameWidth || "?"}×${r.frameHeight || "?"} @ ${fps.toFixed(0)} fps\n` +
       `${(kbps / 1000).toFixed(1)} Mbit/s  ${encoder}\n` +
       `buffer ${jitterMs.toFixed(0)} ms  decode ${decodeMs.toFixed(1)} ms\n` +
-      `lost ${r.packetsLost ?? 0}  dropped ${r.framesDropped ?? 0}`;
+      `lost ${r.packetsLost ?? 0}  dropped ${r.framesDropped ?? 0}\n` +
+      `devices connected ${devices}`;
     last = r;
   });
 }, 1000);

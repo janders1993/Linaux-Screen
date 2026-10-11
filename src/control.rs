@@ -17,9 +17,30 @@ pub enum Exit {
     Idle,
 }
 
+/// The most devices that can watch at once; more are turned away.
+pub const MAX_VIEWERS: usize = 4;
+
+/// A connected device.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Viewer {
+    pub addr: SocketAddr,
+    /// What the device says it is ("iPad", "Android phone", …), once known.
+    pub name: Option<String>,
+}
+
+impl Viewer {
+    /// e.g. "iPad (192.168.1.120)" or just the address.
+    pub fn label(&self) -> String {
+        match &self.name {
+            Some(name) => format!("{name} ({})", self.addr.ip()),
+            None => self.addr.ip().to_string(),
+        }
+    }
+}
+
 pub struct Control {
-    /// Devices currently connected, by address.
-    pub viewers: watch::Sender<Vec<SocketAddr>>,
+    /// Devices currently connected, in the order they connected.
+    pub viewers: watch::Sender<Vec<Viewer>>,
     /// Bumped by "Disconnect all devices".
     pub kick: watch::Sender<u64>,
     /// When the auto-stop countdown ends, if it's running.
@@ -57,12 +78,41 @@ impl Control {
     }
 
     /// Registers a connected device; it's unregistered when the guard drops.
-    pub fn viewer_connected(&self, peer: SocketAddr) -> ViewerGuard<'_> {
-        self.viewers.send_modify(|v| v.push(peer));
-        ViewerGuard {
+    /// Returns `None` if `MAX_VIEWERS` devices are already connected.
+    pub fn viewer_connected(&self, peer: SocketAddr) -> Option<ViewerGuard<'_>> {
+        let mut added = false;
+        self.viewers.send_if_modified(|v| {
+            if v.len() < MAX_VIEWERS {
+                v.push(Viewer {
+                    addr: peer,
+                    name: None,
+                });
+                added = true;
+            }
+            added
+        });
+        added.then_some(ViewerGuard {
             control: self,
             peer,
-        }
+        })
+    }
+
+    /// Records the name a device gave itself.
+    pub fn set_viewer_name(&self, peer: SocketAddr, name: String) {
+        self.viewers.send_modify(|v| {
+            if let Some(viewer) = v.iter_mut().find(|v| v.addr == peer) {
+                viewer.name = Some(name);
+            }
+        });
+    }
+
+    /// Whether `peer` is the device that connected first among those still
+    /// connected.
+    pub fn is_first_viewer(&self, peer: SocketAddr) -> bool {
+        self.viewers
+            .borrow()
+            .first()
+            .is_some_and(|v| v.addr == peer)
     }
 }
 
@@ -75,7 +125,7 @@ impl Drop for ViewerGuard<'_> {
     fn drop(&mut self) {
         let peer = self.peer;
         self.control.viewers.send_modify(|v| {
-            if let Some(i) = v.iter().position(|p| *p == peer) {
+            if let Some(i) = v.iter().position(|v| v.addr == peer) {
                 v.remove(i);
             }
         });
@@ -146,7 +196,7 @@ mod tests {
         let c = control.clone();
         let task = tokio::spawn(async move { run_auto_stop(&c, Duration::from_secs(60)).await });
         {
-            let _guard = control.viewer_connected(addr(1));
+            let _guard = control.viewer_connected(addr(1)).unwrap();
             tokio::time::sleep(Duration::from_secs(5)).await;
         } // device leaves
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -162,9 +212,9 @@ mod tests {
         let control = std::sync::Arc::new(Control::new(String::new()));
         let c = control.clone();
         tokio::spawn(async move { run_auto_stop(&c, Duration::from_secs(60)).await });
-        drop(control.viewer_connected(addr(1)));
+        drop(control.viewer_connected(addr(1)).unwrap());
         tokio::time::sleep(Duration::from_secs(50)).await;
-        let _back = control.viewer_connected(addr(2));
+        let _back = control.viewer_connected(addr(2)).unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(control.countdown.borrow().is_none());
         tokio::time::sleep(Duration::from_secs(600)).await;
@@ -176,11 +226,40 @@ mod tests {
         let control = std::sync::Arc::new(Control::new(String::new()));
         let c = control.clone();
         tokio::spawn(async move { run_auto_stop(&c, Duration::from_secs(60)).await });
-        let phone = control.viewer_connected(addr(1));
+        let phone = control.viewer_connected(addr(1)).unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let _ipad = control.viewer_connected(addr(2));
+        let _ipad = control.viewer_connected(addr(2)).unwrap();
         drop(phone);
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(control.countdown.borrow().is_none());
+    }
+
+    #[test]
+    fn turns_away_devices_beyond_the_limit() {
+        let control = Control::new(String::new());
+        let guards: Vec<_> = (0..MAX_VIEWERS as u16)
+            .map(|i| {
+                control
+                    .viewer_connected(addr(i))
+                    .expect("room for this one")
+            })
+            .collect();
+        assert!(control.viewer_connected(addr(99)).is_none());
+        assert_eq!(control.viewers.borrow().len(), MAX_VIEWERS);
+        drop(guards);
+        assert!(control.viewer_connected(addr(99)).is_some());
+    }
+
+    #[test]
+    fn first_viewer_and_names() {
+        let control = Control::new(String::new());
+        let ipad = control.viewer_connected(addr(1)).unwrap();
+        let _phone = control.viewer_connected(addr(2)).unwrap();
+        assert!(control.is_first_viewer(addr(1)));
+        assert!(!control.is_first_viewer(addr(2)));
+        control.set_viewer_name(addr(1), "iPad".into());
+        assert_eq!(control.viewers.borrow()[0].label(), "iPad (192.168.1.9)");
+        drop(ipad);
+        assert!(control.is_first_viewer(addr(2)));
     }
 }
