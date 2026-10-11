@@ -19,10 +19,16 @@
   }
   #hud {
     position: fixed; top: max(8px, env(safe-area-inset-top)); left: max(8px, env(safe-area-inset-left));
-    padding: 6px 10px; border-radius: 6px; background: rgba(0, 0, 0, .65);
-    white-space: pre; pointer-events: none;
+    padding: 8px 10px; border-radius: 8px; background: rgba(0, 0, 0, .75);
   }
   #hud.hidden { display: none; }
+  #stats { white-space: pre; }
+  #ctl {
+    display: block; width: 100%; margin-top: 8px; padding: 10px 12px; border: 1px solid #4a6;
+    border-radius: 6px; background: #142; color: #dfe; font: inherit; font-size: 15px;
+  }
+  #ctl.on { background: #431; border-color: #c74; }
+  #ctl:disabled { opacity: .5; }
   #status {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     text-align: center; padding: 24px; font-size: 16px; color: #8ab;
@@ -46,7 +52,7 @@
 <body>
 <video id="video" autoplay playsinline muted></video>
 <div id="status">Connecting…</div>
-<div id="hud" class="hidden"></div>
+<div id="hud" class="hidden"><div id="stats">Waiting for video…</div><button id="ctl" type="button">Request control</button></div>
 <div id="hint" class="hidden">Tap the screen for fullscreen</div>
 <div id="sound" class="hidden">🔊 Tap to enable sound</div>
 <script>
@@ -54,6 +60,8 @@
 const video = document.getElementById("video");
 const statusEl = document.getElementById("status");
 const hud = document.getElementById("hud");
+const statsEl = document.getElementById("stats");
+const ctlBtn = document.getElementById("ctl");
 
 let pc = null;
 let ws = null;
@@ -69,6 +77,13 @@ let failures = 0;
 // tray menu: wait for a tap) or "stopped" (keep checking quietly, so it
 // reconnects by itself when the app is started again).
 let ended = null;
+// Mouse and keyboard. Nothing is sent to the PC until it accepts this
+// device's request ("on"); the PC enforces that too.
+let inputAvailable = false;
+let control = "off";        // off | pending | on
+let retryAt = 0;            // after a denial: when asking again is allowed
+let controlNote = "";       // e.g. "Denied on the PC"
+let releasing = false;      // this device gave control back itself
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -130,6 +145,7 @@ function connect() {
       try { pc && pc.close(); } catch (_) {}
       video.srcObject = null;
       setAudio(false);
+      setControl("off");
       if (ended === "full") {
         setStatus("Too many devices are already watching. Tap to try again.");
         ended = "disconnected";  // wait for a tap, like disconnect-all
@@ -139,8 +155,22 @@ function connect() {
       setAudio(msg.on);
     } else if (msg.type === "viewers") {
       devices = msg.count;
+    } else if (msg.type === "control") {
+      if (msg.state === "denied" || msg.state === "cooldown") {
+        retryAt = Date.now() + 1000 * (msg.wait || 30);
+        setControl("off", msg.state === "denied" ? "Denied on the PC" : "Denied recently");
+      } else if (msg.state === "unavailable") {
+        inputAvailable = false;
+        setControl("off");
+      } else {
+        const ended = msg.state === "off" && control === "on" && !releasing;
+        releasing = false;
+        setControl(msg.state, ended ? "Control ended on the PC" : "");
+      }
     } else if (msg.type === "info") {
       encoder = msg.encoder;
+      inputAvailable = !!msg.input;
+      updateControlButton();
       // The app was updated since this page was loaded: get the new page.
       if (msg.page && msg.page !== PAGE_VERSION) location.reload();
     }
@@ -152,6 +182,7 @@ function connect() {
     sendDisplay();
   };
   ws.onclose = () => {
+    setControl("off");  // control ends with the connection
     if (ended === "disconnected") return;  // wait for a tap
     if (ended === "stopped") { retry(null, 5000); return; }
     retry("Disconnected");
@@ -254,6 +285,7 @@ document.addEventListener("fullscreenchange", () => {
 // Stats overlay: tap with three fingers to toggle.
 let last = null;
 setInterval(async () => {
+  updateControlButton();  // counts down after a denial
   if (!pc || hud.classList.contains("hidden")) return;
   const stats = await pc.getStats();
   stats.forEach((r) => {
@@ -266,12 +298,13 @@ setInterval(async () => {
       jitterMs = (1000 * r.jitterBufferDelay) / r.jitterBufferEmittedCount;
     }
     const decodeMs = r.framesDecoded ? (1000 * (r.totalDecodeTime || 0)) / r.framesDecoded : 0;
-    hud.textContent =
+    statsEl.textContent =
       `${r.frameWidth || "?"}×${r.frameHeight || "?"} @ ${fps.toFixed(0)} fps\n` +
       `${(kbps / 1000).toFixed(1)} Mbit/s  ${encoder}\n` +
       `buffer ${jitterMs.toFixed(0)} ms  decode ${decodeMs.toFixed(1)} ms\n` +
       `lost ${r.packetsLost ?? 0}  dropped ${r.framesDropped ?? 0}\n` +
-      `devices connected ${devices}  sound ${audioOn ? "on" : "off"}`;
+      `devices connected ${devices}  sound ${audioOn ? "on" : "off"}\n` +
+      `control ${control === "on" ? "ON — touches click on the PC" : control}`;
     last = r;
   });
 }, 1000);
@@ -279,9 +312,184 @@ setInterval(async () => {
 document.addEventListener("touchstart", (e) => {
   if (e.touches.length === 3) hud.classList.toggle("hidden");
 }, { passive: true });
-document.addEventListener("keydown", (e) => {
-  if (e.key === "s") hud.classList.toggle("hidden");
+
+// ---- Mouse and keyboard control --------------------------------------
+// Asked for from the three-finger menu only, so it can't happen by accident.
+
+function send(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+// Input goes out only while the PC has accepted this device.
+function sendInput(msg) {
+  if (control === "on") send(msg);
+}
+
+function setControl(state, note = "") {
+  if (control === "on" && state !== "on") releaseHeld();
+  control = state;
+  controlNote = note;
+  updateControlButton();
+}
+
+function updateControlButton() {
+  const wait = Math.ceil((retryAt - Date.now()) / 1000);
+  ctlBtn.classList.toggle("on", control === "on");
+  ctlBtn.disabled = !inputAvailable || (control === "off" && wait > 0);
+  if (!inputAvailable) ctlBtn.textContent = "Mouse & keyboard unavailable";
+  else if (control === "on") ctlBtn.textContent = "Release control";
+  else if (control === "pending") ctlBtn.textContent = "Waiting for the PC… (tap to cancel)";
+  else if (wait > 0) ctlBtn.textContent = `${controlNote || "Denied"} — ask again in ${wait}s`;
+  else ctlBtn.textContent = controlNote ? `${controlNote} — Request control` : "Request control";
+}
+
+ctlBtn.addEventListener("click", () => {
+  if (control === "on" || control === "pending") {
+    releasing = true;
+    send({ type: "release-control" });
+  }
+  else send({ type: "request-control" });
 });
+
+// Where a touch lands on the PC's screen (0..1), allowing for the black bars
+// object-fit:contain leaves; plus how many PC pixels one page pixel covers.
+function toScreen(t) {
+  const r = video.getBoundingClientRect();
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const s = Math.min(r.width / vw, r.height / vh);
+  const w = vw * s, h = vh * s;
+  return {
+    x: (t.clientX - r.left - (r.width - w) / 2) / w,
+    y: (t.clientY - r.top - (r.height - h) / 2) / h,
+    scale: 1 / s,
+  };
+}
+function movePointer(t) {
+  const p = toScreen(t);
+  if (p) sendInput({ type: "pointer", x: p.x, y: p.y });
+  return p;
+}
+function clickButton(button) {
+  sendInput({ type: "button", button, down: true });
+  sendInput({ type: "button", button, down: false });
+}
+function centre(touches) {
+  let x = 0, y = 0;
+  for (const t of touches) { x += t.clientX; y += t.clientY; }
+  return { clientX: x / touches.length, clientY: y / touches.length };
+}
+
+// One finger: tap = click, hold = right-click, drag = hold the left button
+// and move (drags windows). Two fingers: scroll. Three: the menu, never sent.
+const HOLD_MS = 500, MOVE_PX = 10;
+let gesture = null;
+
+function inMenu(e) { return hud.contains(e.target); }
+
+document.addEventListener("touchstart", (e) => {
+  if (control !== "on" || inMenu(e)) return;
+  e.preventDefault();
+  const n = e.touches.length;
+  if (!gesture) {
+    if (n !== 1) return;
+    const t = e.touches[0];
+    gesture = { mode: "tap", start: { clientX: t.clientX, clientY: t.clientY }, last: null };
+    gesture.timer = setTimeout(() => {
+      if (gesture && gesture.mode === "tap") {
+        gesture.mode = "done";
+        movePointer(gesture.start);
+        clickButton("right");
+        if (navigator.vibrate) navigator.vibrate(20);
+      }
+    }, HOLD_MS);
+    return;
+  }
+  clearTimeout(gesture.timer);
+  if (gesture.mode === "drag") sendInput({ type: "button", button: "left", down: false });
+  if (n === 2 && gesture.mode !== "menu") {
+    gesture.mode = "scroll";
+    gesture.last = centre(e.touches);
+  } else if (n >= 3) {
+    gesture.mode = "menu";
+  }
+}, { passive: false });
+
+document.addEventListener("touchmove", (e) => {
+  if (!gesture) return;
+  e.preventDefault();
+  if (gesture.mode === "tap") {
+    const t = e.touches[0];
+    if (Math.hypot(t.clientX - gesture.start.clientX, t.clientY - gesture.start.clientY) < MOVE_PX) return;
+    clearTimeout(gesture.timer);
+    gesture.mode = "drag";
+    movePointer(gesture.start);
+    sendInput({ type: "button", button: "left", down: true });
+    movePointer(t);
+  } else if (gesture.mode === "drag") {
+    movePointer(e.touches[0]);
+  } else if (gesture.mode === "scroll" && e.touches.length >= 2) {
+    const c = centre(e.touches);
+    const p = toScreen(c);
+    const k = p ? p.scale : 1;
+    // Content follows the fingers, like scrolling on the phone itself.
+    const dx = -(c.clientX - gesture.last.clientX) * k;
+    const dy = -(c.clientY - gesture.last.clientY) * k;
+    gesture.last = c;
+    if (dx || dy) sendInput({ type: "scroll", dx, dy });
+  }
+}, { passive: false });
+
+function endGesture(e, cancelled) {
+  if (!gesture) return;
+  e.preventDefault();
+  if (e.touches.length > 0) return;  // wait until every finger is up
+  clearTimeout(gesture.timer);
+  if (gesture.mode === "tap" && !cancelled) {
+    movePointer(gesture.start);
+    clickButton("left");
+  } else if (gesture.mode === "drag") {
+    sendInput({ type: "button", button: "left", down: false });
+  } else if (gesture.mode === "scroll") {
+    sendInput({ type: "scroll", dx: 0, dy: 0, end: true });
+  }
+  gesture = null;
+  if (audioOn) setAudio(true);  // a tap still counts as permission for sound
+}
+document.addEventListener("touchend", (e) => endGesture(e, false), { passive: false });
+document.addEventListener("touchcancel", (e) => endGesture(e, true), { passive: false });
+
+// Physical keyboards only. Keys go by position (KeyboardEvent.code), so the
+// PC's keyboard layout decides the character. The iPad's Cmd key is Super.
+const held = new Set();
+function releaseHeld() {
+  for (const code of held) {
+    held.delete(code);
+    send({ type: "key", code, down: false });
+  }
+  if (gesture && gesture.mode === "drag") send({ type: "button", button: "left", down: false });
+  gesture = null;
+}
+document.addEventListener("keydown", (e) => {
+  if (control !== "on") {
+    if (e.key === "s") hud.classList.toggle("hidden");
+    return;
+  }
+  e.preventDefault();
+  if (e.repeat || !e.code || held.has(e.code)) return;
+  held.add(e.code);
+  sendInput({ type: "key", code: e.code, down: true });
+});
+document.addEventListener("keyup", (e) => {
+  if (control !== "on" || !e.code) return;
+  e.preventDefault();
+  if (held.delete(e.code)) sendInput({ type: "key", code: e.code, down: false });
+  // Safari doesn't report letting go of other keys while Cmd is held, so
+  // treat letting go of Cmd as letting go of everything.
+  if (e.code.startsWith("Meta") || e.code.startsWith("OS")) releaseHeld();
+});
+// Switching away from the page: let go of everything so nothing sticks.
+window.addEventListener("blur", () => releaseHeld());
+document.addEventListener("visibilitychange", () => { if (document.hidden) releaseHeld(); });
 
 // Android: a tap goes fullscreen. (iPhone Safari can't fullscreen a page;
 // use Share > Add to Home Screen instead.)

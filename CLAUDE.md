@@ -5,10 +5,11 @@ Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet
 ## Layout
 
 - `src/main.rs` — CLI flags, startup (single-instance via the port, log file), shutdown/restart (restart = exec self)
-- `src/control.rs` — shared state: connected viewers, disconnect-all, exit requests; auto-stop countdown (starts only after a device has connected and the last one left)
-- `src/tray.rs` — ksni tray icon (status, copy address, restart, disconnect all, stop); `src/desktop.rs` — notifications + clipboard over D-Bus
+- `src/control.rs` — shared state: connected viewers, disconnect-all, exit requests, input `Access` (pending/granted, deny cooldown by IP); auto-stop countdown (starts only after a device has connected and the last one left)
+- `src/input.rs` — accepted input → portal calls (`InputSink`; logs instead in test mode), `DeviceInput` tracks held keys/buttons and releases them when control ends, `ask_host` (Accept/Deny notification, 30 s = deny), `evdev_key` (KeyboardEvent.code → Linux keycode)
+- `src/tray.rs` — ksni tray icon (status, control requests Accept/Deny/Revoke, copy address, sound output, restart, disconnect all, stop); `src/desktop.rs` — notifications (incl. `ask` with action buttons) + clipboard over D-Bus
 - `scripts/install.sh` — host-side install: binary to ~/.local/bin + `io.github.janders1993.LinauxScreen.desktop`
-- `src/capture.rs` — xdg-desktop-portal ScreenCast via `ashpd` (virtual monitor or mirror); stores a restore token in `~/.config/linaux-screen/`
+- `src/capture.rs` — xdg-desktop-portal via `ashpd`: a RemoteDesktop session with the ScreenCast (virtual monitor or mirror) inside it, so one prompt covers input; falls back to screencast-only. Restore tokens per launcher in `~/.config/linaux-screen/` (`_remote` ones for the combined session)
 - `src/pipeline.rs` — builds GStreamer pipeline descriptions (capture, encoder choice + automatic bitrate, viewer), `element_desc()`, logging helpers, `--capture-only` diagnostic
 - `src/hub.rs` — `CaptureHub`: one long-running capture pipeline (pipewiresrc → NV12 → appsink) started at launch, pushing frames to every subscribed viewer
 - `src/session.rs` — `Signal` (WebSocket messages) and `Session`: one viewer's pipeline (appsrc → H.264 → rtph264pay → webrtcbin)
@@ -23,12 +24,13 @@ Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet
 
 - Keep capture in its own pipeline. Capture inside the per-viewer WebRTC pipeline ran at ~1 fps on KWin; separate, it runs at full rate. Also: no `keepalive-time` on pipewiresrc (throttled KWin to ~1 fps), and always request `max-framerate` (otherwise ~1 fps).
 
-- Server is always the WebRTC offerer; the browser answers.
+- Server is always the WebRTC offerer; the browser answers. It offers once: size changes travel in-band in H.264 (a re-offer crashed webrtcbin 1.24 with the audio track).
+- Input: nothing from a device reaches the PC until the PC accepts it. The server checks `has_control` on every input message (the viewer also sends nothing before approval). Request control lives only in the three-finger menu. No on-screen keyboard.
 - Encoder/element properties go through `element_desc()`, which drops properties or enum values the installed GStreamer doesn't support, so one unknown property can't break the pipeline.
 - Keep the viewer a single dependency-free HTML file.
 
 ## Testing without a Plasma desktop
 
-`cargo run -- --source test --encoder x264` streams a test pattern with no portal involved. In test mode, viewer `display` messages resize the test pattern, exercising the same renegotiation path as a real monitor resize. A headless client (e.g. aiortc) can verify the WebRTC path; note aiortc only offers ECDSA DTLS ciphers, so widen its cipher list to include `ECDHE-RSA-*` to match browsers.
+`cargo run -- --source test --encoder x264` streams a test pattern with no portal involved. In test mode, viewer `display` messages resize the test pattern, exercising the same size-change path as a real monitor resize, and accepted input is logged (`test input: …`) instead of sent. Control requests still go through the notification; without a notification server they time out to Deny after 30 s (or accept from the tray). A headless client (e.g. aiortc) can verify the WebRTC path; note aiortc only offers ECDSA DTLS ciphers, so widen its cipher list to include `ECDHE-RSA-*` to match browsers.
 
 Build deps (Debian/Ubuntu): `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libdbus-1-dev`; runtime: `gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-nice gstreamer1.0-plugins-ugly`.

@@ -4,6 +4,7 @@ mod control;
 mod desktop;
 mod display;
 mod hub;
+mod input;
 mod pipeline;
 mod server;
 mod session;
@@ -191,7 +192,17 @@ async fn main() -> Result<()> {
     if !audio_available {
         tracing::warn!("sending sound to devices needs pactl and pw-cli (PipeWire tools)");
     }
-    let control = Arc::new(Control::with_audio(address.clone(), audio_available));
+    // Mouse and keyboard, if the portal granted them. In test mode input is
+    // only logged. Either way a device needs the PC's OK first.
+    let input = match &capture {
+        Some(c) => c
+            .input
+            .clone()
+            .map(|remote| input::InputSink::portal(remote, hub.clone())),
+        None => Some(input::InputSink::logging()),
+    };
+    let control =
+        Arc::new(Control::with_audio(address.clone(), audio_available).with_input(input.is_some()));
     let audio_router = Arc::new(audio::AudioRouter::default());
     let audio_task = tokio::spawn(audio::run(control.clone(), audio_router.clone(), test_tone));
     if !args.no_tray {
@@ -210,7 +221,7 @@ async fn main() -> Result<()> {
 
     let mut exit_rx = control.exit.subscribe();
     let why = tokio::select! {
-        result = server::run(listener, control.clone(), audio_router, encoder, hub.clone(), virtual_display) => {
+        result = server::run(listener, control.clone(), audio_router, encoder, hub.clone(), virtual_display, input) => {
             result?;
             Exit::Stop
         }

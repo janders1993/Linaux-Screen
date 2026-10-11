@@ -233,7 +233,7 @@ pub(crate) fn capture_desc(source: &Source, fps: u32, dmabuf: bool) -> (String, 
         }
         Source::Test => {
             // `testcaps` is named so resize requests can change it, which
-            // exercises the same renegotiation path as a real monitor resize.
+            // exercises the same size-change path as a real monitor resize.
             let base = "videotestsrc name=capture is-live=true pattern=ball \
                  ! capsfilter name=testcaps caps=video/x-raw,width=1280,height=720,framerate=60/1";
             // A running clock makes latency easy to eyeball, if pango is installed.
