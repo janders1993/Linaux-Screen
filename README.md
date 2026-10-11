@@ -36,13 +36,15 @@ Capture runs in its own pipeline for the life of the app and hands frames to one
 | Server | Rust: `ashpd`, `gstreamer-rs`, `axum`; tray icon via `ksni` |
 | Viewer | One plain HTML/JS page served by the app |
 | Running | App-menu entry; tray icon while running; stops after a minute with no device |
+| Sound | A "Linaux Screen" PipeWire speaker, made the default output while a device is picked → Opus in the same WebRTC session |
 
-Planned, not built yet: touch/keyboard input (RemoteDesktop portal), pen pressure (uinput), audio (PipeWire → Opus in the same WebRTC session).
+Planned, not built yet: touch/keyboard input (RemoteDesktop portal), pen pressure (uinput).
 
 ## Requirements
 
 - KDE Plasma 6 on Wayland, with PipeWire and xdg-desktop-portal-kde
 - A GPU with hardware H.264 encoding (or a CPU to spare for software encoding)
+- For sound: `pactl` and `pw-cli` (PipeWire tools, normally preinstalled)
 - The phone/tablet on the same network, with a modern browser
 
 ## Roadmap
@@ -51,7 +53,7 @@ Ordered by what matters most day to day; each step is a GitHub issue.
 
 - [x] **Spike** — virtual monitor streamed to a phone browser (#1)
 - [x] **Run without a terminal**: app-menu entry, tray icon, auto-stop (#8)
-- [ ] **Audio**: desktop sound on the device (#3)
+- [x] **Sound**: send the PC's sound to a chosen device from the tray (#3)
 - [x] **Several devices at once**: all mirror the same screen (#6)
 - [ ] **Input**: touchscreen tap/drag and iPad keyboard (#2), then pen pressure (#5)
 - [ ] **Later**: match the monitor to the device (#4, experimental `--fit-device` flag), video wall (#10)
@@ -117,6 +119,7 @@ Several devices can watch at once (up to four). They all see the same screen, ea
 The **tray menu** shows who's connected, e.g. *iPad (192.168.1.120)*, and has:
 - **Copy address**
 - **Restart**: also picks up a newly installed version.
+- **Sound output**: *This PC (default)* or any connected device. Picking a device moves all the PC's sound to it and the PC goes quiet. Sound goes back to the PC when you pick *This PC*, the device disconnects, or the app stops or restarts. Nothing changes until you pick.
 - **Disconnect all devices**: they show "tap to reconnect".
 - **Stop**
 
@@ -124,7 +127,7 @@ A new monitor appears in **System Settings → Display** while it runs. Drag it 
 
 The virtual monitor starts at 1920×1080, letterboxed on the device. You can change its resolution and scale in **System Settings → Display Configuration** (it's listed as *Virtual Output*). KDE remembers the setting, so it's applied every time the app starts. `--fit-device` (experimental) resizes it automatically to match the device and follows rotation, but resizing mid-stream costs a lot of frame rate on KDE + NVIDIA (#4).
 
-On the device: tap with **three fingers** (or press `s`) to show stats: resolution, fps, bitrate, buffer and decode time, and how many devices are connected.
+On the device: tap with **three fingers** (or press `s`) to show stats: resolution, fps, bitrate, buffer and decode time, how many devices are connected, and whether sound is on. When a device is picked for sound, it may show **Tap to enable sound**, because browsers only play sound after a tap.
 
 **Running from a terminal** works too: `linaux-screen` (with any options below). Logs always go to `~/.local/state/linaux-screen/linaux-screen.log`.
 

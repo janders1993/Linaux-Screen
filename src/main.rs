@@ -1,3 +1,4 @@
+mod audio;
 mod capture;
 mod control;
 mod desktop;
@@ -180,7 +181,19 @@ async fn main() -> Result<()> {
     let address = format!("http://{ip}:{}", args.port);
     println!("\n  Open on your phone or tablet:  {address}\n");
 
-    let control = Arc::new(Control::new(address.clone()));
+    // Sound stays on the PC until a device is picked in the tray. Put it
+    // back first if a previous run didn't get to.
+    let test_tone = args.source == SourceKind::Test;
+    let audio_available = test_tone || audio::available();
+    if !test_tone && audio_available {
+        audio::recover();
+    }
+    if !audio_available {
+        tracing::warn!("sending sound to devices needs pactl and pw-cli (PipeWire tools)");
+    }
+    let control = Arc::new(Control::with_audio(address.clone(), audio_available));
+    let audio_router = Arc::new(audio::AudioRouter::default());
+    let audio_task = tokio::spawn(audio::run(control.clone(), audio_router.clone(), test_tone));
     if !args.no_tray {
         tokio::spawn(tray::run(control.clone()));
     }
@@ -197,7 +210,7 @@ async fn main() -> Result<()> {
 
     let mut exit_rx = control.exit.subscribe();
     let why = tokio::select! {
-        result = server::run(listener, control.clone(), encoder, hub.clone(), virtual_display) => {
+        result = server::run(listener, control.clone(), audio_router, encoder, hub.clone(), virtual_display) => {
             result?;
             Exit::Stop
         }
@@ -211,6 +224,8 @@ async fn main() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Dropping these ends the screencast, which removes the virtual monitor.
+    // Put sound back on the PC before anything else goes.
+    let _ = tokio::time::timeout(Duration::from_secs(3), audio_task).await;
     drop(hub);
     drop(capture);
 

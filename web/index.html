@@ -35,6 +35,12 @@
     pointer-events: none; transition: opacity .4s;
   }
   #hint.hidden { opacity: 0; }
+  #sound {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    padding: 14px 22px; border-radius: 24px; background: rgba(0, 0, 0, .8);
+    color: #fff; font-size: 17px; pointer-events: none;
+  }
+  #sound.hidden { display: none; }
 </style>
 </head>
 <body>
@@ -42,6 +48,7 @@
 <div id="status">Connecting…</div>
 <div id="hud" class="hidden"></div>
 <div id="hint" class="hidden">Tap the screen for fullscreen</div>
+<div id="sound" class="hidden">🔊 Tap to enable sound</div>
 <script>
 "use strict";
 const video = document.getElementById("video");
@@ -54,6 +61,8 @@ let encoder = "?";
 // Filled in by the app when it serves this page.
 const PAGE_VERSION = "__PAGE_VERSION__";
 let devices = 0;
+// Whether the PC has picked this device for its sound.
+let audioOn = false;
 let retryTimer = null;
 let failures = 0;
 // Set when the PC closes the connection on purpose: "disconnected" (from its
@@ -70,14 +79,23 @@ function connect() {
   clearTimeout(retryTimer);
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
+  video.srcObject = null;
   lastDisplay = "";
   pc = new RTCPeerConnection({ iceServers: [] });
 
   pc.ontrack = (e) => {
     // Ask the browser to play frames as soon as they arrive.
-    try { e.receiver.jitterBufferTarget = 0; } catch (_) {}
-    try { e.receiver.playoutDelayHint = 0; } catch (_) {}
-    video.srcObject = e.streams[0] || new MediaStream([e.track]);
+    // Only for video: sound needs a small cushion, and forcing it to zero
+    // makes the browser constantly stretch and squash it (robotic sound).
+    if (e.track.kind === "video") {
+      try { e.receiver.jitterBufferTarget = 0; } catch (_) {}
+      try { e.receiver.playoutDelayHint = 0; } catch (_) {}
+    }
+    // Video and audio arrive as separate tracks; play both in the one
+    // <video>, which stays muted unless this device is picked for sound.
+    const stream = video.srcObject || new MediaStream();
+    stream.addTrack(e.track);
+    video.srcObject = stream;
   };
 
   pc.onicecandidate = (e) => {
@@ -111,11 +129,14 @@ function connect() {
       ended = msg.reason;
       try { pc && pc.close(); } catch (_) {}
       video.srcObject = null;
+      setAudio(false);
       if (ended === "full") {
         setStatus("Too many devices are already watching. Tap to try again.");
         ended = "disconnected";  // wait for a tap, like disconnect-all
       } else if (ended === "disconnected") setStatus("Disconnected from the PC. Tap to reconnect.");
       else setStatus("Stopped on the PC. This page reconnects by itself when it's started again.");
+    } else if (msg.type === "audio") {
+      setAudio(msg.on);
     } else if (msg.type === "viewers") {
       devices = msg.count;
     } else if (msg.type === "info") {
@@ -136,6 +157,23 @@ function connect() {
     retry("Disconnected");
   };
   ws.onerror = () => {};
+}
+
+// Unmute when the PC picks this device for its sound. Browsers only allow
+// sound after the page has been tapped, so ask for a tap if it's refused.
+function setAudio(on) {
+  audioOn = on;
+  const prompt = document.getElementById("sound");
+  if (!on) {
+    video.muted = true;
+    prompt.classList.add("hidden");
+    return;
+  }
+  video.muted = false;
+  video.play().then(
+    () => prompt.classList.add("hidden"),
+    () => { video.muted = true; prompt.classList.remove("hidden"); },
+  );
 }
 
 // A friendly name for the tray on the PC, e.g. "iPad (192.168.1.120)".
@@ -233,7 +271,7 @@ setInterval(async () => {
       `${(kbps / 1000).toFixed(1)} Mbit/s  ${encoder}\n` +
       `buffer ${jitterMs.toFixed(0)} ms  decode ${decodeMs.toFixed(1)} ms\n` +
       `lost ${r.packetsLost ?? 0}  dropped ${r.framesDropped ?? 0}\n` +
-      `devices connected ${devices}`;
+      `devices connected ${devices}  sound ${audioOn ? "on" : "off"}`;
     last = r;
   });
 }, 1000);
@@ -257,7 +295,8 @@ document.addEventListener("click", () => {
   if (!document.fullscreenElement && el.requestFullscreen) {
     el.requestFullscreen().catch(() => {});
   }
-  video.play().catch(() => {});
+  if (audioOn) setAudio(true);  // this tap counts as permission to play sound
+  else video.play().catch(() => {});
 });
 
 connect();

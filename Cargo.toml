@@ -18,6 +18,7 @@ gst-app = { version = "0.25", package = "gstreamer-app" }
 gst-sdp = { package = "gstreamer-sdp", version = "0.25" }
 gst-webrtc = { package = "gstreamer-webrtc", version = "0.25" }
 ksni = "0.3"
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

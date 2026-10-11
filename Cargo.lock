@@ -1095,6 +1095,7 @@ dependencies = [
  "gstreamer-sdp",
  "gstreamer-webrtc",
  "ksni",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

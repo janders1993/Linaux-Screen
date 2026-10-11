@@ -136,9 +136,23 @@ impl EncoderChoice {
     }
 }
 
+/// The raw audio format passed from the audio capture to viewers.
+pub const AUDIO_CAPS: &str = "audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2";
+
 /// Pipeline description for one viewer: takes NV12 frames from the capture
-/// hub via `appsrc`, encodes and sends them over WebRTC.
+/// hub via `appsrc` named `src`, encodes and sends them over WebRTC. Audio
+/// comes in through `asrc`; it only receives data while this device is the
+/// chosen audio output.
 fn viewer_desc(encoder: &str) -> String {
+    let opus = element_desc(
+        "opusenc",
+        &[
+            ("bitrate", "128000"),
+            ("frame-size", "10"),
+            ("audio-type", "restricted-lowdelay"),
+        ],
+    )
+    .unwrap_or_else(|| "opusenc".into());
     format!(
         "appsrc name=src is-live=true format=time do-timestamp=true \
          ! queue max-size-buffers=1 leaky=downstream \
@@ -146,7 +160,13 @@ fn viewer_desc(encoder: &str) -> String {
          ! h264parse name=parse \
          ! rtph264pay name=pay config-interval=-1 aggregate-mode=zero-latency \
          ! application/x-rtp,media=video,encoding-name=H264,payload=96 \
-         ! webrtcbin name=webrtc bundle-policy=max-bundle"
+         ! webrtcbin name=webrtc bundle-policy=max-bundle \
+         appsrc name=asrc is-live=true format=time caps={AUDIO_CAPS} \
+         ! queue max-size-time=100000000 leaky=downstream \
+         ! audioconvert ! {opus} \
+         ! rtpopuspay pt=97 \
+         ! application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000 \
+         ! webrtc."
     )
 }
 

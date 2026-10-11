@@ -14,9 +14,58 @@ struct ScreenTray {
     runtime: tokio::runtime::Handle,
     viewers: Vec<Viewer>,
     stop_at: Option<Instant>,
+    audio_target: Option<std::net::SocketAddr>,
 }
 
 impl ScreenTray {
+    /// "Sound output" submenu: This PC, then each connected device.
+    fn sound_menu(&self) -> ksni::MenuItem<Self> {
+        use ksni::menu::*;
+        if !self.control.audio_available {
+            return StandardItem {
+                label: "Sound output: unavailable (needs pactl and pw-cli)".into(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into();
+        }
+        let mut options = vec![RadioItem {
+            label: "This PC (default)".into(),
+            ..Default::default()
+        }];
+        options.extend(self.viewers.iter().map(|v| RadioItem {
+            label: v.label(),
+            ..Default::default()
+        }));
+        let selected = self
+            .audio_target
+            .and_then(|t| self.viewers.iter().position(|v| v.addr == t))
+            .map_or(0, |i| i + 1);
+        let current = if selected == 0 {
+            "This PC".to_owned()
+        } else {
+            self.viewers[selected - 1].label()
+        };
+        SubMenu {
+            label: format!("Sound output: {current}"),
+            icon_name: "audio-volume-high".into(),
+            submenu: vec![RadioGroup {
+                selected,
+                select: Box::new(|this: &mut Self, index| {
+                    let target = index
+                        .checked_sub(1)
+                        .and_then(|i| this.viewers.get(i))
+                        .map(|v| v.addr);
+                    this.control.audio_target.send_replace(target);
+                }),
+                options,
+            }
+            .into()],
+            ..Default::default()
+        }
+        .into()
+    }
+
     fn status(&self) -> String {
         if !self.viewers.is_empty() {
             let who: Vec<String> = self.viewers.iter().map(Viewer::label).collect();
@@ -74,6 +123,7 @@ impl ksni::Tray for ScreenTray {
                 ..Default::default()
             }
             .into(),
+            self.sound_menu(),
             MenuItem::Separator,
             StandardItem {
                 label: "Restart".into(),
@@ -110,6 +160,7 @@ pub async fn run(control: Arc<Control>) {
         runtime: tokio::runtime::Handle::current(),
         viewers: Vec::new(),
         stop_at: None,
+        audio_target: None,
     };
     let handle = match tray.spawn().await {
         Ok(h) => h,
@@ -121,19 +172,23 @@ pub async fn run(control: Arc<Control>) {
 
     let mut viewers = control.viewers.subscribe();
     let mut countdown = control.countdown.subscribe();
+    let mut audio = control.audio_target.subscribe();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         let v = viewers.borrow_and_update().clone();
         let c = *countdown.borrow_and_update();
+        let a = *audio.borrow_and_update();
         handle
             .update(|t| {
                 t.viewers = v;
                 t.stop_at = c;
+                t.audio_target = a;
             })
             .await;
         tokio::select! {
             r = viewers.changed() => if r.is_err() { break },
             r = countdown.changed() => if r.is_err() { break },
+            r = audio.changed() => if r.is_err() { break },
             // Refresh the "stopping in Ns" text once a second.
             _ = tick.tick(), if c.is_some() => {}
         }

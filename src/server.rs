@@ -15,6 +15,7 @@ use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
+use crate::audio::AudioRouter;
 use crate::control::{Control, MAX_VIEWERS};
 use crate::display::{self, VirtualDisplay};
 use crate::hub::CaptureHub;
@@ -38,6 +39,7 @@ fn page_version() -> &'static str {
 
 struct AppState {
     control: Arc<Control>,
+    audio: Arc<AudioRouter>,
     encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
@@ -46,12 +48,14 @@ struct AppState {
 pub async fn run(
     listener: tokio::net::TcpListener,
     control: Arc<Control>,
+    audio: Arc<AudioRouter>,
     encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
 ) -> Result<()> {
     let state = Arc::new(AppState {
         control,
+        audio,
         encoder,
         hub,
         display,
@@ -102,6 +106,8 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     let mut exit_rx = state.control.exit.subscribe();
     let mut viewers_rx = state.control.viewers.subscribe();
     viewers_rx.mark_changed(); // send the current count straight away
+    let mut audio_rx = state.control.audio_target.subscribe();
+    let mut audio_on = false;
     let mut last_count = 0;
 
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<Signal>();
@@ -129,6 +135,7 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
             return;
         }
     };
+    state.audio.register(peer, session.audio_src.clone());
 
     loop {
         tokio::select! {
@@ -140,6 +147,15 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
             Ok(()) = exit_rx.changed() => {
                 say_bye(&mut ws_tx, "stopped").await;
                 break;
+            }
+            Ok(()) = audio_rx.changed() => {
+                let on = *audio_rx.borrow_and_update() == Some(peer);
+                if on == audio_on { continue }
+                audio_on = on;
+                let Ok(text) = serde_json::to_string(&Signal::Audio { on }) else { continue };
+                if ws_tx.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
             }
             Ok(()) = viewers_rx.changed() => {
                 let count = viewers_rx.borrow_and_update().len();
@@ -184,6 +200,7 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
         }
     }
 
+    state.audio.unregister(peer);
     drop(session);
     tracing::info!("viewer {peer} disconnected");
 }
