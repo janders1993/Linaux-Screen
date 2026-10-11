@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -86,42 +86,79 @@ pub fn recover() {
 
 /// The "Linaux Screen" speaker, set as the default output while it exists.
 struct VirtualSpeaker {
-    helper: Child,
+    /// Dropping this tells the helper's thread to stop it.
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
     previous_default: Option<String>,
+}
+
+/// Starts the `pw-cli` helper that owns the speaker, on a thread of its own
+/// that lives exactly as long as the speaker.
+///
+/// The helper is set to be killed if its parent dies (so a crashed app can't
+/// leave the PC silent). Linux counts the *thread* that started it as the
+/// parent, so it must not be a worker thread that might be retired while the
+/// speaker is in use: that's what made sound drop back to the PC every so
+/// often.
+fn spawn_helper() -> Result<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::Builder::new()
+        .name("linaux-speaker".into())
+        .spawn(move || {
+            let mut cmd = Command::new("pw-cli");
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
+            }
+            let mut helper = match cmd.spawn() {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e).context("could not start pw-cli"));
+                    return;
+                }
+            };
+            let create = format!(
+                "create-node adapter {{ factory.name=support.null-audio-sink node.name={SINK_NAME} \
+                 node.description=\"Linaux Screen\" media.class=Audio/Sink object.linger=false \
+                 audio.position=[FL,FR] }}\n"
+            );
+            let written = helper
+                .stdin
+                .as_mut()
+                .context("no stdin for pw-cli")
+                .and_then(|stdin| Ok(stdin.write_all(create.as_bytes())?));
+            let failed = written.is_err();
+            let _ = ready_tx.send(written);
+            if !failed {
+                // Wait until the speaker is no longer wanted (or the sender
+                // is dropped).
+                let _ = stop_rx.recv();
+            }
+            let _ = helper.kill();
+            let _ = helper.wait();
+        })
+        .context("could not start the speaker thread")?;
+    ready_rx
+        .recv()
+        .context("the speaker thread stopped unexpectedly")??;
+    Ok((stop_tx, thread))
 }
 
 impl VirtualSpeaker {
     fn create() -> Result<Self> {
         let previous_default = pactl(&["get-default-sink"]).ok().filter(|d| d != SINK_NAME);
-
-        let mut cmd = Command::new("pw-cli");
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        // Tie the helper to this process: if the app dies for any reason,
-        // the helper is killed, the speaker vanishes, and PipeWire falls back
-        // to the PC's own output.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                Ok(())
-            });
-        }
-        let mut helper = cmd.spawn().context("could not start pw-cli")?;
-        let create = format!(
-            "create-node adapter {{ factory.name=support.null-audio-sink node.name={SINK_NAME} \
-             node.description=\"Linaux Screen\" media.class=Audio/Sink object.linger=false \
-             audio.position=[FL,FR] }}\n"
-        );
-        helper
-            .stdin
-            .as_mut()
-            .context("no stdin for pw-cli")?
-            .write_all(create.as_bytes())?;
-
+        let (stop, thread) = spawn_helper()?;
+        // From here on, dropping `speaker` cleans up.
         let speaker = Self {
-            helper,
+            stop: Some(stop),
+            thread: Some(thread),
             previous_default,
         };
         for _ in 0..30 {
@@ -154,8 +191,10 @@ impl Drop for VirtualSpeaker {
                 tracing::warn!("couldn't restore audio output {previous}: {e:#}");
             }
         }
-        let _ = self.helper.kill();
-        let _ = self.helper.wait();
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
         if let Some(file) = restore_file() {
             let _ = std::fs::remove_file(file);
         }
@@ -357,9 +396,27 @@ pub async fn run(control: Arc<Control>, router: Arc<AudioRouter>, test_tone: boo
             }
         }
 
+        let mut check_speaker = false;
         tokio::select! {
             r = choice.changed() => if r.is_err() { break },
             _ = exit.wait_for(|e| e.is_some()) => break,
+            _ = tokio::time::sleep(Duration::from_secs(2)), if speaker.is_some() => check_speaker = true,
+        }
+        // Safety net: if the speaker vanishes some other way (e.g. PipeWire
+        // restarted), PipeWire has already gone back to the PC's output;
+        // catch up so the tray doesn't claim otherwise.
+        if check_speaker
+            && !tokio::task::spawn_blocking(|| sink_exists(SINK_NAME))
+                .await
+                .unwrap_or(true)
+        {
+            tracing::warn!("the Linaux Screen speaker disappeared; sound is back on the PC");
+            crate::desktop::notify(
+                "Sound back on the PC",
+                "The connection to the device's sound was lost.",
+            )
+            .await;
+            control.audio_target.send_replace(None);
         }
     }
 
@@ -460,5 +517,63 @@ mod tests {
         recover();
         assert_eq!(pactl(&["get-default-sink"]).unwrap(), before);
         assert!(!restore_file().unwrap().exists());
+    }
+
+    /// Needs PipeWire. The speaker must survive the worker thread that
+    /// created it being retired (tokio retires idle blocking threads after
+    /// ~10 s).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn speaker_survives_idle_threads() {
+        gst::init().unwrap();
+        let control = Arc::new(Control::with_audio(String::new(), true));
+        let task = tokio::spawn(run(
+            control.clone(),
+            Arc::new(AudioRouter::default()),
+            false,
+        ));
+        control
+            .audio_target
+            .send_replace(Some("192.168.1.9:5000".parse().unwrap()));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(sink_exists(SINK_NAME));
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        assert!(
+            sink_exists(SINK_NAME),
+            "speaker vanished while still in use"
+        );
+        assert_eq!(pactl(&["get-default-sink"]).unwrap(), SINK_NAME);
+        control.request_exit(crate::control::Exit::Stop);
+        task.await.unwrap();
+    }
+
+    /// Needs PipeWire. If the speaker is removed behind the app's back, the
+    /// app notices and goes back to "This PC".
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn notices_speaker_removed_externally() {
+        gst::init().unwrap();
+        let control = Arc::new(Control::with_audio(String::new(), true));
+        let task = tokio::spawn(run(
+            control.clone(),
+            Arc::new(AudioRouter::default()),
+            false,
+        ));
+        control
+            .audio_target
+            .send_replace(Some("192.168.1.9:5000".parse().unwrap()));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(sink_exists(SINK_NAME));
+        // Kill the helper as if PipeWire had dropped the speaker.
+        let _ = Command::new("pkill").args(["-x", "pw-cli"]).status();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert_eq!(
+            *control.audio_target.borrow(),
+            None,
+            "tray should be back on This PC"
+        );
+        assert_ne!(pactl(&["get-default-sink"]).unwrap(), SINK_NAME);
+        control.request_exit(crate::control::Exit::Stop);
+        task.await.unwrap();
     }
 }
