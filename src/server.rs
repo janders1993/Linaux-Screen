@@ -13,9 +13,9 @@ use axum::routing::get;
 use axum::Router;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
-use crate::control::Control;
+use crate::control::{Control, MAX_VIEWERS};
 use crate::display::{self, VirtualDisplay};
 use crate::hub::CaptureHub;
 use crate::pipeline::EncoderChoice;
@@ -23,14 +23,24 @@ use crate::session::{Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
 
+/// A short fingerprint of the viewer page. Pages stay open across app
+/// restarts and reconnect by themselves, so a page from an older build would
+/// otherwise keep running after an update.
+fn page_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        VIEWER_HTML.hash(&mut h);
+        format!("{:016x}", h.finish())
+    })
+}
+
 struct AppState {
     control: Arc<Control>,
     encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
-    /// Bumped on every new connection. One device streams at a time, so a new
-    /// connection takes over from the previous one.
-    generation: watch::Sender<u64>,
 }
 
 pub async fn run(
@@ -45,7 +55,6 @@ pub async fn run(
         encoder,
         hub,
         display,
-        generation: watch::Sender::new(0),
     });
 
     let app = Router::new()
@@ -56,7 +65,7 @@ pub async fn run(
             get(|| async {
                 (
                     [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Html(VIEWER_HTML),
+                    Html(VIEWER_HTML.replace("__PAGE_VERSION__", page_version())),
                 )
             }),
         )
@@ -80,19 +89,21 @@ async fn ws_handler(
 }
 
 async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    // Every device watches the same screen, up to MAX_VIEWERS at once.
+    let Some(_registered) = state.control.viewer_connected(peer) else {
+        tracing::warn!("turning away {peer}: already {MAX_VIEWERS} devices connected");
+        say_bye(&mut ws_tx, "full").await;
+        return;
+    };
     tracing::info!("viewer connected from {peer}");
-    let _registered = state.control.viewer_connected(peer);
     let mut kick_rx = state.control.kick.subscribe();
     let mut exit_rx = state.control.exit.subscribe();
+    let mut viewers_rx = state.control.viewers.subscribe();
+    viewers_rx.mark_changed(); // send the current count straight away
+    let mut last_count = 0;
 
-    let mut my_generation = 0;
-    state.generation.send_modify(|g| {
-        *g += 1;
-        my_generation = *g;
-    });
-    let mut generation_rx = state.generation.subscribe();
-
-    let (mut ws_tx, mut ws_rx) = socket.split();
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<Signal>();
 
     let (width, height) = state.hub.frame_size().unwrap_or((1920, 1080));
@@ -107,6 +118,7 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     tracing::debug!("viewer pipeline: {desc}");
     let _ = signal_tx.send(Signal::Info {
         encoder: encoder_name,
+        page: page_version().to_owned(),
     });
 
     let session = match Session::start(&desc, signal_tx, state.hub.clone()) {
@@ -129,6 +141,16 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
                 say_bye(&mut ws_tx, "stopped").await;
                 break;
             }
+            Ok(()) = viewers_rx.changed() => {
+                let count = viewers_rx.borrow_and_update().len();
+                // Names changing doesn't change the count.
+                if count == last_count { continue }
+                last_count = count;
+                let Ok(text) = serde_json::to_string(&Signal::Viewers { count }) else { continue };
+                if ws_tx.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
             Some(signal) = signal_rx.recv() => {
                 let Ok(text) = serde_json::to_string(&signal) else { continue };
                 if ws_tx.send(Message::Text(text.into())).await.is_err() {
@@ -138,7 +160,16 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
             incoming = ws_rx.next() => match incoming {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<Signal>(&text) {
                     Ok(Signal::Display { width, height, dpr }) => {
-                        resize_for(&state, peer, width, height, dpr);
+                        // Only the first device steers the size, so two
+                        // devices don't fight over it.
+                        if state.control.is_first_viewer(peer) {
+                            resize_for(&state, peer, width, height, dpr);
+                        }
+                    }
+                    Ok(Signal::Hello { device }) => {
+                        let device: String = device.chars().filter(|c| !c.is_control()).take(40).collect();
+                        tracing::info!("{peer} is {device}");
+                        state.control.set_viewer_name(peer, device);
                     }
                     Ok(signal) => {
                         if let Err(e) = session.handle(signal) {
@@ -150,13 +181,6 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 _ => {}
             },
-            Ok(()) = generation_rx.changed() => {
-                if *generation_rx.borrow() != my_generation {
-                    tracing::info!("viewer {peer} replaced by a newer connection");
-                    let _ = ws_tx.send(Message::Close(None)).await;
-                    break;
-                }
-            }
         }
     }
 

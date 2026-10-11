@@ -1,26 +1,25 @@
 //! System tray icon, shown while the app runs.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ksni::TrayMethods;
 use tokio::time::Instant;
 
-use crate::control::{Control, Exit};
+use crate::control::{Control, Exit, Viewer};
 use crate::desktop;
 
 struct ScreenTray {
     control: Arc<Control>,
     runtime: tokio::runtime::Handle,
-    viewers: Vec<SocketAddr>,
+    viewers: Vec<Viewer>,
     stop_at: Option<Instant>,
 }
 
 impl ScreenTray {
     fn status(&self) -> String {
         if !self.viewers.is_empty() {
-            let who: Vec<String> = self.viewers.iter().map(|p| p.ip().to_string()).collect();
+            let who: Vec<String> = self.viewers.iter().map(Viewer::label).collect();
             format!("Connected: {}", who.join(", "))
         } else if let Some(at) = self.stop_at {
             let secs = at.saturating_duration_since(Instant::now()).as_secs();
