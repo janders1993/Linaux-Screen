@@ -51,6 +51,8 @@ const hud = document.getElementById("hud");
 let pc = null;
 let ws = null;
 let encoder = "?";
+// Filled in by the app when it serves this page.
+const PAGE_VERSION = "__PAGE_VERSION__";
 let devices = 0;
 let retryTimer = null;
 let failures = 0;
@@ -118,6 +120,8 @@ function connect() {
       devices = msg.count;
     } else if (msg.type === "info") {
       encoder = msg.encoder;
+      // The app was updated since this page was loaded: get the new page.
+      if (msg.page && msg.page !== PAGE_VERSION) location.reload();
     }
   };
 

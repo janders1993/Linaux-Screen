@@ -30,6 +30,9 @@ pub enum Signal {
     /// Server-side status for the viewer's stats overlay.
     Info {
         encoder: String,
+        /// Identifies this build's viewer page. A page left open from an
+        /// older build reloads itself when it sees a different value.
+        page: String,
     },
     /// How many devices are watching, sent whenever it changes.
     Viewers {

@@ -23,6 +23,19 @@ use crate::session::{Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
 
+/// A short fingerprint of the viewer page. Pages stay open across app
+/// restarts and reconnect by themselves, so a page from an older build would
+/// otherwise keep running after an update.
+fn page_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        VIEWER_HTML.hash(&mut h);
+        format!("{:016x}", h.finish())
+    })
+}
+
 struct AppState {
     control: Arc<Control>,
     encoder: EncoderChoice,
@@ -52,7 +65,7 @@ pub async fn run(
             get(|| async {
                 (
                     [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Html(VIEWER_HTML),
+                    Html(VIEWER_HTML.replace("__PAGE_VERSION__", page_version())),
                 )
             }),
         )
@@ -105,6 +118,7 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     tracing::debug!("viewer pipeline: {desc}");
     let _ = signal_tx.send(Signal::Info {
         encoder: encoder_name,
+        page: page_version().to_owned(),
     });
 
     let session = match Session::start(&desc, signal_tx, state.hub.clone()) {
