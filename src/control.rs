@@ -47,13 +47,24 @@ pub struct Control {
     pub countdown: watch::Sender<Option<Instant>>,
     /// Set once to shut the app down.
     pub exit: watch::Sender<Option<Exit>>,
+    /// Which device plays the PC's sound; `None` = the PC itself.
+    pub audio_target: watch::Sender<Option<SocketAddr>>,
+    /// Whether sound can be sent to devices at all (PipeWire tools present).
+    pub audio_available: bool,
     /// The address devices connect to, e.g. `http://192.168.1.20:4444`.
     pub address: String,
 }
 
 impl Control {
+    #[cfg(test)]
     pub fn new(address: String) -> Self {
+        Self::with_audio(address, false)
+    }
+
+    pub fn with_audio(address: String, audio_available: bool) -> Self {
         Self {
+            audio_target: watch::Sender::new(None),
+            audio_available,
             viewers: watch::Sender::new(Vec::new()),
             kick: watch::Sender::new(0),
             countdown: watch::Sender::new(None),
@@ -124,6 +135,15 @@ pub struct ViewerGuard<'a> {
 impl Drop for ViewerGuard<'_> {
     fn drop(&mut self) {
         let peer = self.peer;
+        // Sound goes back to the PC if this device was playing it.
+        self.control.audio_target.send_if_modified(|t| {
+            if *t == Some(peer) {
+                *t = None;
+                true
+            } else {
+                false
+            }
+        });
         self.control.viewers.send_modify(|v| {
             if let Some(i) = v.iter().position(|v| v.addr == peer) {
                 v.remove(i);
@@ -261,5 +281,17 @@ mod tests {
         assert_eq!(control.viewers.borrow()[0].label(), "iPad (192.168.1.9)");
         drop(ipad);
         assert!(control.is_first_viewer(addr(2)));
+    }
+
+    #[test]
+    fn audio_falls_back_to_pc_when_device_leaves() {
+        let control = Control::with_audio(String::new(), true);
+        let ipad = control.viewer_connected(addr(1)).unwrap();
+        let phone = control.viewer_connected(addr(2)).unwrap();
+        control.audio_target.send_replace(Some(addr(1)));
+        drop(phone); // someone else leaving changes nothing
+        assert_eq!(*control.audio_target.borrow(), Some(addr(1)));
+        drop(ipad);
+        assert_eq!(*control.audio_target.borrow(), None);
     }
 }

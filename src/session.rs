@@ -38,6 +38,10 @@ pub enum Signal {
     Viewers {
         count: usize,
     },
+    /// Whether this device is now the chosen sound output.
+    Audio {
+        on: bool,
+    },
     /// The viewer says what kind of device it is ("iPad", …), for the tray.
     Hello {
         device: String,
@@ -61,6 +65,8 @@ pub struct Session {
     webrtc: gst::Element,
     hub: Arc<CaptureHub>,
     subscription: u64,
+    /// Where this device's audio goes in, while it's the chosen output.
+    pub audio_src: gst_app::AppSrc,
 }
 
 impl Session {
@@ -73,16 +79,25 @@ impl Session {
             .by_name("src")
             .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
             .context("appsrc missing from viewer pipeline")?;
+        let audio_src = pipeline
+            .by_name("asrc")
+            .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+            .context("audio appsrc missing from viewer pipeline")?;
         pipeline::spawn_fps_logger(&pipeline, "parse", "encoded");
 
-        // We only send video; tell the browser not to bother sending any.
-        if let Some(transceiver) = webrtc
-            .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>("get-transceiver", &[&0i32])
-        {
-            transceiver.set_property(
-                "direction",
-                gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
-            );
+        // We only send (video and audio); tell the browser not to send any.
+        for index in 0..2i32 {
+            if let Some(transceiver) = webrtc
+                .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>(
+                    "get-transceiver",
+                    &[&index],
+                )
+            {
+                transceiver.set_property(
+                    "direction",
+                    gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
+                );
+            }
         }
 
         let offer_tx = tx.clone();
@@ -139,12 +154,19 @@ impl Session {
             "pipeline refused to start — run with RUST_LOG=debug GST_DEBUG=3 for details",
         )?;
 
+        // WebRTC won't make an offer until every track's format is known,
+        // and the audio track only gets data while this device is the
+        // chosen output. One short burst of silence sets it up straight away.
+        let silence = gst::Buffer::from_mut_slice(vec![0u8; 48_000 / 100 * 2 * 2]); // 10 ms
+        let _ = audio_src.push_buffer(silence);
+
         let subscription = hub.subscribe(appsrc);
         Ok(Self {
             pipeline,
             webrtc,
             hub,
             subscription,
+            audio_src,
         })
     }
 
