@@ -434,7 +434,7 @@ mod tests {
     use super::*;
 
     /// Needs a running PipeWire with pactl and pw-cli:
-    /// `cargo test -- --ignored audio_switches_and_restores`
+    /// `cargo test -- --ignored --test-threads=1` (the tests share PipeWire)
     #[tokio::test(flavor = "multi_thread")]
     #[ignore]
     async fn audio_switches_and_restores() {
@@ -481,7 +481,7 @@ mod tests {
         std::thread::sleep(Duration::from_secs(60));
     }
 
-    /// Needs a running PipeWire: `cargo test -- --ignored speaker_gone_after_crash`
+    /// Needs a running PipeWire (run with `--test-threads=1`).
     #[test]
     #[ignore]
     fn speaker_gone_after_crash() {
