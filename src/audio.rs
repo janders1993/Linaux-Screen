@@ -168,6 +168,28 @@ impl Drop for VirtualSpeaker {
 pub struct AudioRouter {
     inputs: Mutex<HashMap<SocketAddr, gst_app::AppSrc>>,
     target: Mutex<Option<SocketAddr>>,
+    clock: Mutex<Option<SampleClock>>,
+}
+
+/// Timestamps sound by counting samples, so they advance by exactly the
+/// length of each chunk. (Stamping chunks by when they happen to arrive made
+/// the timing uneven, and the browser played it back choppy and robotic.)
+struct SampleClock {
+    target: SocketAddr,
+    start: gst::ClockTime,
+    samples: u64,
+}
+
+/// How far the sample count may drift from the viewer pipeline's clock
+/// before it's re-synced (the PC's sound clock and the system clock tick at
+/// very slightly different rates).
+const MAX_DRIFT: gst::ClockTime = gst::ClockTime::from_mseconds(150);
+
+/// The viewer pipeline's current running time.
+fn running_time(input: &gst_app::AppSrc) -> Option<gst::ClockTime> {
+    let clock = input.clock()?;
+    let base = input.base_time()?;
+    clock.time().checked_sub(base)
 }
 
 impl AudioRouter {
@@ -187,12 +209,48 @@ impl AudioRouter {
         let (Some(input), Some(buffer)) = (inputs.get(&target), sample.buffer()) else {
             return;
         };
-        // The viewer stamps buffers with its own clock.
+        let Some(now) = running_time(input) else {
+            return;
+        };
+        let samples = (buffer.size() / 4) as u64; // 16-bit stereo
+        let duration = gst::ClockTime::from_nseconds(samples * 1_000_000_000 / 48_000);
+
+        let mut clock = self.clock.lock().unwrap();
+        let pts = match clock.as_mut() {
+            Some(c) if c.target == target => {
+                let pts =
+                    c.start + gst::ClockTime::from_nseconds(c.samples * 1_000_000_000 / 48_000);
+                let drift = if pts > now { pts - now } else { now - pts };
+                if drift > MAX_DRIFT {
+                    tracing::debug!("re-syncing sound timing (drift {drift})");
+                    c.start = now;
+                    c.samples = 0;
+                    now
+                } else {
+                    pts
+                }
+            }
+            _ => {
+                // New target: start counting from its pipeline's current time.
+                *clock = Some(SampleClock {
+                    target,
+                    start: now,
+                    samples: 0,
+                });
+                now
+            }
+        };
+        if let Some(c) = clock.as_mut() {
+            c.samples += samples;
+        }
+        drop(clock);
+
         let mut buffer = buffer.copy();
         {
             let b = buffer.make_mut();
-            b.set_pts(gst::ClockTime::NONE);
+            b.set_pts(pts);
             b.set_dts(gst::ClockTime::NONE);
+            b.set_duration(duration);
         }
         let _ = input.push_buffer(buffer);
     }

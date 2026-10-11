@@ -157,7 +157,8 @@ impl Session {
         // WebRTC won't make an offer until every track's format is known,
         // and the audio track only gets data while this device is the
         // chosen output. One short burst of silence sets it up straight away.
-        let silence = gst::Buffer::from_mut_slice(vec![0u8; 48_000 / 100 * 2 * 2]); // 10 ms
+        let mut silence = gst::Buffer::from_mut_slice(vec![0u8; 48_000 / 100 * 2 * 2]); // 10 ms
+        silence.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
         let _ = audio_src.push_buffer(silence);
 
         let subscription = hub.subscribe(appsrc);

@@ -161,7 +161,7 @@ fn viewer_desc(encoder: &str) -> String {
          ! rtph264pay name=pay config-interval=-1 aggregate-mode=zero-latency \
          ! application/x-rtp,media=video,encoding-name=H264,payload=96 \
          ! webrtcbin name=webrtc bundle-policy=max-bundle \
-         appsrc name=asrc is-live=true format=time do-timestamp=true caps={AUDIO_CAPS} \
+         appsrc name=asrc is-live=true format=time caps={AUDIO_CAPS} \
          ! queue max-size-time=100000000 leaky=downstream \
          ! audioconvert ! {opus} \
          ! rtpopuspay pt=97 \

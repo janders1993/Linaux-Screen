@@ -85,8 +85,12 @@ function connect() {
 
   pc.ontrack = (e) => {
     // Ask the browser to play frames as soon as they arrive.
-    try { e.receiver.jitterBufferTarget = 0; } catch (_) {}
-    try { e.receiver.playoutDelayHint = 0; } catch (_) {}
+    // Only for video: sound needs a small cushion, and forcing it to zero
+    // makes the browser constantly stretch and squash it (robotic sound).
+    if (e.track.kind === "video") {
+      try { e.receiver.jitterBufferTarget = 0; } catch (_) {}
+      try { e.receiver.playoutDelayHint = 0; } catch (_) {}
+    }
     // Video and audio arrive as separate tracks; play both in the one
     // <video>, which stays muted unless this device is picked for sound.
     const stream = video.srcObject || new MediaStream();
