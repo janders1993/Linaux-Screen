@@ -61,12 +61,6 @@ pub enum Signal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kbps: Option<u32>,
     },
-    /// The viewer's screen in physical pixels, sent on connect and rotation.
-    Display {
-        width: u32,
-        height: u32,
-        dpr: f64,
-    },
     /// The viewer asks to control the PC (from its menu). The PC must accept.
     #[serde(rename = "request-control")]
     RequestControl,

@@ -238,15 +238,6 @@ impl Control {
             }
         });
     }
-
-    /// Whether `peer` is the device that connected first among those still
-    /// connected.
-    pub fn is_first_viewer(&self, peer: SocketAddr) -> bool {
-        self.viewers
-            .borrow()
-            .first()
-            .is_some_and(|v| v.addr == peer)
-    }
 }
 
 pub struct ViewerGuard<'a> {
@@ -395,16 +386,13 @@ mod tests {
     }
 
     #[test]
-    fn first_viewer_and_names() {
+    fn names_and_labels() {
         let control = Control::new(String::new());
-        let ipad = control.viewer_connected(addr(1)).unwrap();
+        let _ipad = control.viewer_connected(addr(1)).unwrap();
         let _phone = control.viewer_connected(addr(2)).unwrap();
-        assert!(control.is_first_viewer(addr(1)));
-        assert!(!control.is_first_viewer(addr(2)));
         control.set_viewer_name(addr(1), "iPad".into());
         assert_eq!(control.viewers.borrow()[0].label(), "iPad (192.168.1.9)");
-        drop(ipad);
-        assert!(control.is_first_viewer(addr(2)));
+        assert_eq!(control.viewer_label(addr(2)), "192.168.1.9");
     }
 
     fn with_input() -> Control {

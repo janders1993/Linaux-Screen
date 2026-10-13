@@ -24,20 +24,20 @@ use ashpd::enumflags2::BitFlags;
 
 use crate::SourceKind;
 
-/// A running portal screencast. Keep it alive for as long as you stream:
-/// dropping it closes the session and KDE removes the virtual monitor.
+/// A running portal screencast, kept for as long as the app streams.
+/// `close` ends it, and KDE removes the virtual monitor.
 pub struct Capture {
     pub node_id: u32,
     fd: OwnedFd,
     /// Mouse and keyboard on this PC, if the portal granted them.
     pub input: Option<Arc<RemoteInput>>,
-    _session: CastSession,
+    session: CastSession,
     _proxy: Screencast,
 }
 
 enum CastSession {
-    Screencast(#[allow(dead_code)] Session<Screencast>),
-    Remote(#[allow(dead_code)] Arc<RemoteInput>),
+    Screencast(Session<Screencast>),
+    Remote(Arc<RemoteInput>),
 }
 
 /// A portal RemoteDesktop session we can send pointer and keyboard events
@@ -54,6 +54,18 @@ pub struct RemoteInput {
 impl Capture {
     pub fn pipewire_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+
+    /// Ends the screencast (and remote control); KDE removes the virtual
+    /// monitor. Otherwise that only happens when the app exits.
+    pub async fn close(self) {
+        let result = match &self.session {
+            CastSession::Screencast(session) => session.close().await,
+            CastSession::Remote(remote) => remote.session.close().await,
+        };
+        if let Err(e) = result {
+            tracing::debug!("closing the screencast: {e}");
+        }
     }
 }
 
@@ -242,7 +254,7 @@ async fn start_remote(
         node_id,
         fd,
         input: granted.contains(wanted).then(|| input.clone()),
-        _session: CastSession::Remote(input),
+        session: CastSession::Remote(input),
         _proxy: cast,
     })
 }
@@ -303,7 +315,7 @@ async fn start_screencast(
         node_id,
         fd,
         input: None,
-        _session: CastSession::Screencast(session),
+        session: CastSession::Screencast(session),
         _proxy: proxy,
     })
 }

@@ -27,14 +27,14 @@
     display: block; width: 100%; margin-top: 8px; padding: 10px 12px; border: 1px solid #4a6;
     border-radius: 6px; background: #142; color: #dfe; font: inherit; font-size: 15px;
   }
+  #ctl.on { background: #431; border-color: #c74; }
+  #ctl:disabled { opacity: .5; }
   #quality { display: flex; gap: 4px; margin-top: 8px; }
   #quality button {
     flex: 1; padding: 8px 4px; border: 1px solid #456; border-radius: 6px;
     background: #123; color: #cde; font: inherit; font-size: 13px;
   }
   #quality button.on { background: #2a5; border-color: #4c7; color: #fff; }
-  #ctl.on { background: #431; border-color: #c74; }
-  #ctl:disabled { opacity: .5; }
   /* While controlling, the PC's own cursor is in the video; hide the
      device's pointer (iPad trackpad / mouse) so there aren't two. */
   body.controlling video { cursor: none; }
@@ -107,7 +107,6 @@ function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   video.srcObject = null;
-  lastDisplay = "";
   pc = new RTCPeerConnection({ iceServers: [] });
 
   pc.ontrack = (e) => {
@@ -194,7 +193,6 @@ function connect() {
     ended = null;
     showQuality("smooth", 0);
     ws.send(JSON.stringify({ type: "hello", device: deviceName() }));
-    sendDisplay();
   };
   ws.onclose = () => {
     setControl("off");  // control ends with the connection
@@ -235,41 +233,6 @@ function deviceName() {
   return "Browser";
 }
 
-// Tell the PC how much room the video has, in real pixels, so the virtual
-// monitor can match it when the app runs with --fit-device (otherwise the
-// PC ignores this). That's the page area, not the whole screen:
-// in a normal browser tab the address and navigation bars take some, while in
-// fullscreen or a home-screen app it's the full screen. Rotating, entering
-// fullscreen or the bars appearing all fire a resize, which re-sends this.
-function displayInfo() {
-  const dpr = window.devicePixelRatio || 1;
-  const vv = window.visualViewport;
-  const w = vv ? vv.width * vv.scale : window.innerWidth;
-  const h = vv ? vv.height * vv.scale : window.innerHeight;
-  return {
-    type: "display",
-    width: Math.round(w * dpr),
-    height: Math.round(h * dpr),
-    dpr,
-  };
-}
-let lastDisplay = "";
-function sendDisplay() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const info = JSON.stringify(displayInfo());
-  if (info === lastDisplay) return;
-  lastDisplay = info;
-  ws.send(info);
-}
-let displayTimer = null;
-function displayChanged() {
-  clearTimeout(displayTimer);
-  // Wait for the rotation animation to settle before resizing the monitor.
-  displayTimer = setTimeout(sendDisplay, 600);
-}
-window.addEventListener("resize", displayChanged);
-if (screen.orientation) screen.orientation.addEventListener("change", displayChanged);
-
 function retry(reason, delay = 2000) {
   if (retryTimer) return;
   failures++;
@@ -297,7 +260,7 @@ document.addEventListener("fullscreenchange", () => {
   if (document.fullscreenElement) document.getElementById("hint").classList.add("hidden");
 });
 
-// Stats overlay: tap with three fingers to toggle.
+// The menu (stats, quality, control): tap with three fingers to toggle.
 let last = null;
 setInterval(async () => {
   updateControlButton();  // counts down after a denial
@@ -396,7 +359,6 @@ function toScreen(t) {
 function movePointer(t) {
   const p = toScreen(t);
   if (p) sendInput({ type: "pointer", x: p.x, y: p.y });
-  return p;
 }
 function clickButton(button) {
   sendInput({ type: "button", button, down: true });
@@ -422,7 +384,7 @@ document.addEventListener("touchstart", (e) => {
   if (!gesture) {
     if (n !== 1) return;
     const t = e.touches[0];
-    gesture = { mode: "tap", start: { clientX: t.clientX, clientY: t.clientY }, last: null };
+    gesture = { mode: "tap", start: { clientX: t.clientX, clientY: t.clientY } };
     gesture.timer = setTimeout(() => {
       if (gesture && gesture.mode === "tap") {
         gesture.mode = "done";
@@ -562,8 +524,8 @@ document.addEventListener("keyup", (e) => {
 window.addEventListener("blur", () => releaseHeld());
 document.addEventListener("visibilitychange", () => { if (document.hidden) releaseHeld(); });
 
-// Android: a tap goes fullscreen. (iPhone Safari can't fullscreen a page;
-// use Share > Add to Home Screen instead.)
+// A tap goes fullscreen where the browser allows it (Android, iPad), and
+// reconnects after the PC disconnected this device.
 document.addEventListener("click", () => {
   if (ended === "disconnected") {
     ended = null;

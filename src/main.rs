@@ -2,7 +2,6 @@ mod audio;
 mod capture;
 mod control;
 mod desktop;
-mod display;
 mod hub;
 mod input;
 mod pipeline;
@@ -69,17 +68,6 @@ struct Args {
     #[arg(long, default_value_t = 60)]
     fps: u32,
 
-    /// Capture frames as GPU buffers (DMA-BUF) and convert on the GPU.
-    /// Experimental: on KDE + NVIDIA it measured ~20 fps vs ~55 fps default.
-    #[arg(long)]
-    dmabuf: bool,
-
-    /// Experimental: resize the virtual monitor to match the viewing device
-    /// and follow its rotation. Off by default: on KDE + NVIDIA the resizes
-    /// and capture reconnects hurt frame rate badly.
-    #[arg(long)]
-    fit_device: bool,
-
     /// Stop this long after the last device disconnects (seconds; 0 = never).
     /// The countdown only starts once a device has connected and left.
     #[arg(long, default_value_t = 60)]
@@ -132,22 +120,8 @@ async fn main() -> Result<()> {
     let (encoder_name, _, _) = encoder.viewer_pipeline(1920, 1080)?;
     tracing::info!("using encoder {encoder_name}");
 
-    // With --fit-device, note the existing outputs so we can tell which one
-    // the portal adds.
-    let outputs_before = if args.fit_device && args.source == SourceKind::Virtual {
-        match display::output_names().await {
-            Ok(names) => Some(names),
-            Err(e) => {
-                tracing::warn!("can't resize the virtual monitor to fit devices: {e:#}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Held until exit: dropping it ends the screencast and removes the
-    // virtual monitor.
+    // Held until exit: the screencast (and with it the virtual monitor) lasts
+    // as long as the app.
     let capture = match args.source {
         SourceKind::Test => None,
         kind => Some(capture::start(kind).await?),
@@ -160,22 +134,11 @@ async fn main() -> Result<()> {
         None => Source::Test,
     };
 
-    let virtual_display = match outputs_before {
-        Some(before) => match display::VirtualDisplay::find_new(&before).await {
-            Ok(d) => Some(Arc::new(d)),
-            Err(e) => {
-                tracing::warn!("can't resize the virtual monitor to fit devices: {e:#}");
-                None
-            }
-        },
-        None => None,
-    };
-
     let Some(listener) = listener else {
-        pipeline::run_capture_only(&source, args.fps, args.dmabuf).await?;
+        pipeline::run_capture_only(&source, args.fps).await?;
         return Ok(());
     };
-    let hub = Arc::new(CaptureHub::start(&source, args.fps, args.dmabuf)?);
+    let hub = Arc::new(CaptureHub::start(&source, args.fps)?);
 
     let ip = lan_ip()
         .map(|ip| ip.to_string())
@@ -222,7 +185,7 @@ async fn main() -> Result<()> {
 
     let mut exit_rx = control.exit.subscribe();
     let why = tokio::select! {
-        result = server::run(listener, control.clone(), audio_router, encoder, hub.clone(), virtual_display, input) => {
+        result = server::run(listener, control.clone(), audio_router, encoder, hub.clone(), input) => {
             result?;
             Exit::Stop
         }
@@ -235,11 +198,13 @@ async fn main() -> Result<()> {
     control.request_exit(why);
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Dropping these ends the screencast, which removes the virtual monitor.
-    // Put sound back on the PC before anything else goes.
+    // Put sound back on the PC first, then stop capturing and end the
+    // screencast, which removes the virtual monitor.
     let _ = tokio::time::timeout(Duration::from_secs(3), audio_task).await;
     drop(hub);
-    drop(capture);
+    if let Some(capture) = capture {
+        let _ = tokio::time::timeout(Duration::from_secs(2), capture.close()).await;
+    }
 
     match why {
         Exit::Restart => restart(),

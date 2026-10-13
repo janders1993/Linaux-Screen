@@ -174,26 +174,24 @@ fn viewer_desc(encoder: &str) -> String {
 
 /// Returns `(source, convert)`: `source` ends in raw frames from an element
 /// named `capture`; `convert` turns them into NV12 in system memory.
-pub(crate) fn capture_desc(source: &Source, fps: u32, dmabuf: bool) -> (String, String) {
+pub(crate) fn capture_desc(source: &Source, fps: u32) -> (String, String) {
     let videoconvert = element_desc("videoconvert", &[("n-threads", "4")])
         .unwrap_or_else(|| "videoconvert".into());
 
     match source {
         Source::PipeWire { fd, node_id } => {
             let (fd, node) = (fd.to_string(), node_id.to_string());
-            let mut props = vec![
-                ("fd", fd.as_str()),
-                ("path", node.as_str()),
-                ("do-timestamp", "true"),
-            ];
             // Deliberately no `keepalive-time`: with it set, KWin's screencast
             // dropped to ~1 fps. The compositor sends frames only when the
             // screen changes, and a new viewer gets the last frame anyway.
-            if !dmabuf {
-                // Copy each frame out of the compositor's buffer straight
-                // away, so we never hold on to its small buffer pool.
-                props.push(("always-copy", "true"));
-            }
+            // `always-copy` copies each frame out of the compositor's buffer
+            // straight away, so we never hold on to its small buffer pool.
+            let props = [
+                ("fd", fd.as_str()),
+                ("path", node.as_str()),
+                ("do-timestamp", "true"),
+                ("always-copy", "true"),
+            ];
             let pw = element_desc("pipewiresrc", &props)
                 .unwrap_or_else(|| format!("pipewiresrc fd={fd} path={node}"));
 
@@ -217,27 +215,14 @@ pub(crate) fn capture_desc(source: &Source, fps: u32, dmabuf: bool) -> (String, 
                 .map(|i| format!(" ! {i}"))
                 .unwrap_or_default();
 
-            if dmabuf {
-                // Take frames as GPU buffers (DMA-BUF) and convert colours on
-                // the GPU with OpenGL, instead of the compositor copying them
-                // into system memory and converting on the CPU.
-                (
-                    format!("{pw} name=capture ! video/x-raw(memory:DMABuf){rate}{isolate}"),
-                    "glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! gldownload"
-                        .to_owned(),
-                )
-            } else {
-                (
-                    format!("{pw} name=capture ! video/x-raw{rate}{isolate}"),
-                    videoconvert,
-                )
-            }
+            (
+                format!("{pw} name=capture ! video/x-raw{rate}{isolate}"),
+                videoconvert,
+            )
         }
         Source::Test => {
-            // `testcaps` is named so resize requests can change it, which
-            // exercises the same size-change path as a real monitor resize.
             let base = "videotestsrc name=capture is-live=true pattern=ball \
-                 ! capsfilter name=testcaps caps=video/x-raw,width=1280,height=720,framerate=60/1";
+                 ! video/x-raw,width=1280,height=720,framerate=60/1";
             // A running clock makes latency easy to eyeball, if pango is installed.
             let src = match element_desc("timeoverlay", &[]) {
                 Some(overlay) => format!("{base} ! {overlay} font-desc=\"Sans 40\""),
@@ -258,8 +243,8 @@ pub(crate) fn parse(desc: &str) -> Result<gst::Pipeline> {
 
 /// Diagnostic mode (`--capture-only`): capture and count frames, nothing
 /// else. Shows whether the compositor itself is delivering frames slowly.
-pub async fn run_capture_only(source: &Source, fps: u32, dmabuf: bool) -> Result<()> {
-    let (src, _) = capture_desc(source, fps, dmabuf);
+pub async fn run_capture_only(source: &Source, fps: u32) -> Result<()> {
+    let (src, _) = capture_desc(source, fps);
     let pipeline = parse(&format!("{src} ! fakesink sync=false"))?;
     log_capture_caps(&pipeline);
     spawn_fps_logger(&pipeline, "capture", "capture");

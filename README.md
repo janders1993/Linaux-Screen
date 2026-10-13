@@ -4,13 +4,13 @@ Turn any phone or tablet into a second monitor for your Linux desktop — no app
 
 You start the app on the PC, and your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extra (or mirrored) display.
 
-> **Status:** working, used day to day. Runs from the app menu with a tray icon, streams at ~55 fps (1080p) with no noticeable delay, and stops itself when no device is connected. Tested on Bazzite, KDE Plasma, NVIDIA/NVENC, a Galaxy S22 Ultra and an iPad. Touch and keyboard control of the PC, once you accept the device on the PC; pen pressure is planned.
+> **Status:** working, used day to day. Runs from the app menu with a tray icon, streams at ~55 fps (1080p) with no noticeable delay, and stops itself when no device is connected. Tested on Bazzite, KDE Plasma, NVIDIA/NVENC, a Galaxy S22 Ultra and an iPad. Touch, trackpad and keyboard control of the PC, once you accept the device on the PC, and per-device quality presets.
 
 ## Goals
 
-- **Extend** — each connected device gets its own real virtual monitor in KDE's display settings.
+- **Extend** — a real virtual monitor in KDE's display settings, shown on your devices (up to four, all seeing the same screen).
 - **Mirror** — duplicate an existing monitor to a device.
-- **Input** — touch as mouse, on-screen and hardware keyboards, pen with pressure and tilt (Apple Pencil, S-Pen).
+- **Input** — touch as mouse, trackpads and physical keyboards, only for devices you accept on the PC.
 - **Audio** — desktop audio plays on the device.
 - **Zero install on clients** — any modern browser on iOS or Android; tap the video for fullscreen.
 - **Low latency** — hardware H.264 encoding, WebRTC transport, target under 60 ms on a good LAN.
@@ -39,8 +39,6 @@ Capture runs in its own pipeline for the life of the app and hands frames to one
 | Sound | A "Linaux Screen" PipeWire speaker, made the default output while a device is picked → Opus in the same WebRTC session |
 | Input | RemoteDesktop portal (same session as the screencast); events over the WebSocket, only from devices accepted on the PC |
 
-Planned, not built yet: pen pressure (uinput).
-
 ## Requirements
 
 - KDE Plasma 6 on Wayland, with PipeWire and xdg-desktop-portal-kde
@@ -56,9 +54,9 @@ Ordered by what matters most day to day; each step is a GitHub issue.
 - [x] **Run without a terminal**: app-menu entry, tray icon, auto-stop (#8)
 - [x] **Sound**: send the PC's sound to a chosen device from the tray (#3)
 - [x] **Several devices at once**: all mirror the same screen (#6)
-- [x] **Input**: touch as mouse and hardware keyboards, accepted per device on the PC (#2)
-- [ ] **Pen pressure** (#5)
-- [ ] **Later**: match the monitor to the device (#4, experimental `--fit-device` flag), video wall (#10)
+- [x] **Input**: touch as mouse, trackpads and hardware keyboards, accepted per device on the PC (#2)
+- [x] **Quality presets**: Battery saver / Smooth / Sharp / Ultra per device (#21)
+- [ ] **Parked**: switch between Extend and Mirror from the device (#20), pinch to zoom (#22), video wall (#10)
 
 ## Setup
 
@@ -128,7 +126,7 @@ The **tray menu** shows who's connected, e.g. *iPad (192.168.1.120)*, and has:
 
 A new monitor appears in **System Settings → Display** while it runs. Drag it to where you want it relative to your other screens.
 
-The virtual monitor starts at 1920×1080, letterboxed on the device. You can change its resolution and scale in **System Settings → Display Configuration** (it's listed as *Virtual Output*). KDE remembers the setting, so it's applied every time the app starts. `--fit-device` (experimental) resizes it automatically to match the device and follows rotation, but resizing mid-stream costs a lot of frame rate on KDE + NVIDIA (#4).
+The virtual monitor starts at 1920×1080, letterboxed on the device. You can change its resolution and scale in **System Settings → Display Configuration** (it's listed as *Virtual Output*). KDE remembers the setting, so it's applied every time the app starts. If you change it while the app is running, use **Restart** in the tray so the stream picks up the new size.
 
 On the device: tap with **three fingers** (or press `s`) to show the menu: stats (resolution, fps, bitrate, buffer and decode time, quality, devices connected, sound, control), the **quality** buttons and the **Request control** button.
 
@@ -161,7 +159,6 @@ iPadOS keeps a few Cmd shortcuts for itself (Cmd+Tab, Cmd+Space, Cmd+H), so thos
 | `--port <n>` | `4444` | Port to serve on |
 | `--idle-timeout <secs>` | `60` | Stop this long after the last device leaves (`0` = never) |
 | `--no-tray` | off | No tray icon |
-| `--fit-device` | off | Experimental: match the monitor to the device's screen and rotation (hurts frame rate for now) |
 
 **Troubleshooting**
 
