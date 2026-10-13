@@ -21,6 +21,7 @@ use crate::display::{self, VirtualDisplay};
 use crate::hub::CaptureHub;
 use crate::input::{self, DeviceInput, InputSink};
 use crate::pipeline::EncoderChoice;
+use crate::quality::Preset;
 use crate::session::{Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
@@ -139,7 +140,7 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
         input: state.control.input_available,
     });
 
-    let session = match Session::start(&desc, signal_tx, state.hub.clone()) {
+    let session = match Session::start(&desc, kbps, signal_tx, state.hub.clone()) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("could not start stream for {peer}: {e:#}");
@@ -223,6 +224,14 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
                         if state.control.is_first_viewer(peer) {
                             resize_for(&state, peer, width, height, dpr);
                         }
+                    }
+                    Ok(Signal::Quality { preset, .. }) => {
+                        // Only this device's own stream; no PC approval needed.
+                        let Some(preset) = Preset::parse(&preset) else { continue };
+                        let kbps = session.set_quality(preset);
+                        tracing::info!("{peer}: quality {} ({kbps} kbit/s)", preset.name());
+                        let reply = Signal::Quality { preset: preset.name().into(), kbps: Some(kbps) };
+                        if !send(&mut ws_tx, &reply).await { break }
                     }
                     Ok(Signal::RequestControl) => {
                         let reply = match state.control.request_control(peer) {

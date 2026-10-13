@@ -6,6 +6,7 @@ mod display;
 mod hub;
 mod input;
 mod pipeline;
+mod quality;
 mod server;
 mod session;
 mod tray;

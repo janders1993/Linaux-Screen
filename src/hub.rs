@@ -1,7 +1,8 @@
 //! The screen capture, shared by every connected viewer.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use gst::prelude::*;
@@ -23,11 +24,65 @@ pub struct CaptureHub {
 }
 
 /// State the capture pipeline's callback shares with the hub.
-#[derive(Default)]
 struct Shared {
-    viewers: Mutex<Vec<(u64, gst_app::AppSrc)>>,
+    viewers: Mutex<Vec<Subscriber>>,
     last: Mutex<Option<gst::Sample>>,
     next_id: AtomicU64,
+    epoch: Instant,
+}
+
+impl Shared {
+    fn now_us(&self) -> u64 {
+        self.epoch.elapsed().as_micros() as u64
+    }
+}
+
+/// One viewer, with its optional frame-rate cap.
+struct Subscriber {
+    id: u64,
+    appsrc: gst_app::AppSrc,
+    /// Least time between frames, in µs; 0 = every frame.
+    min_interval_us: AtomicU64,
+    last_push_us: AtomicU64,
+    /// A frame was skipped for the cap and nothing newer has been sent yet.
+    /// Sent once the interval has passed, so a still screen never shows an
+    /// out-of-date picture (e.g. the last character typed).
+    owed: AtomicBool,
+}
+
+impl Subscriber {
+    /// Pushes `sample` unless the cap says it's too soon (then it's owed).
+    fn offer(&self, sample: &gst::Sample, now_us: u64) {
+        let min = self.min_interval_us.load(Ordering::Relaxed);
+        if min > 0 && now_us.saturating_sub(self.last_push_us.load(Ordering::Relaxed)) < min {
+            self.owed.store(true, Ordering::Relaxed);
+            return;
+        }
+        self.owed.store(false, Ordering::Relaxed);
+        self.last_push_us.store(now_us, Ordering::Relaxed);
+        push(&self.appsrc, sample);
+    }
+}
+
+/// Sends owed frames to capped viewers once their interval has passed.
+fn run_catch_up(shared: Weak<Shared>) {
+    loop {
+        std::thread::sleep(Duration::from_millis(5));
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        let viewers = shared.viewers.lock().unwrap();
+        if !viewers.iter().any(|v| v.owed.load(Ordering::Relaxed)) {
+            continue;
+        }
+        let Some(sample) = shared.last.lock().unwrap().clone() else {
+            continue;
+        };
+        let now = shared.now_us();
+        for v in viewers.iter().filter(|v| v.owed.load(Ordering::Relaxed)) {
+            v.offer(&sample, now);
+        }
+    }
 }
 
 /// Hands one captured frame to a viewer's pipeline.
@@ -61,7 +116,17 @@ impl CaptureHub {
              ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
         tracing::debug!("capture pipeline: {desc}");
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            viewers: Mutex::new(Vec::new()),
+            last: Mutex::new(None),
+            next_id: AtomicU64::new(0),
+            epoch: Instant::now(),
+        });
+        let weak = Arc::downgrade(&shared);
+        std::thread::Builder::new()
+            .name("linaux-catch-up".into())
+            .spawn(move || run_catch_up(weak))
+            .context("couldn't start the frame catch-up thread")?;
         let pipeline = Self::build(&desc, &shared, None)?;
         Ok(Self {
             desc,
@@ -89,10 +154,13 @@ impl CaptureHub {
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    for (_, appsrc) in shared.viewers.lock().unwrap().iter() {
-                        push(appsrc, &sample);
+                    // Store it first, so an owed frame sent by the catch-up
+                    // thread is never older than this one.
+                    *shared.last.lock().unwrap() = Some(sample.clone());
+                    let now = shared.now_us();
+                    for v in shared.viewers.lock().unwrap().iter() {
+                        v.offer(&sample, now);
                     }
-                    *shared.last.lock().unwrap() = Some(sample);
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
@@ -129,16 +197,35 @@ impl CaptureHub {
         if let Some(sample) = self.shared.last.lock().unwrap().as_ref() {
             push(&appsrc, sample);
         }
-        self.shared.viewers.lock().unwrap().push((id, appsrc));
+        self.shared.viewers.lock().unwrap().push(Subscriber {
+            id,
+            appsrc,
+            min_interval_us: AtomicU64::new(0),
+            last_push_us: AtomicU64::new(self.shared.now_us()),
+            owed: AtomicBool::new(false),
+        });
         id
     }
 
     pub(crate) fn unsubscribe(&self, id: u64) {
-        self.shared
+        self.shared.viewers.lock().unwrap().retain(|v| v.id != id);
+    }
+
+    /// Caps how many frames a second viewer `id` gets (`None` = all of them).
+    pub(crate) fn set_max_fps(&self, id: u64, fps: Option<u32>) {
+        // A little under the exact interval, so frames arriving slightly
+        // early aren't skipped (60 fps capture → a steady 30, not ~22).
+        let interval = fps.filter(|f| *f > 0).map_or(0, |f| 850_000 / f as u64);
+        for v in self
+            .shared
             .viewers
             .lock()
             .unwrap()
-            .retain(|(i, _)| *i != id);
+            .iter()
+            .filter(|v| v.id == id)
+        {
+            v.min_interval_us.store(interval, Ordering::Relaxed);
+        }
     }
 
     /// The size of the frames currently being captured, once known.
