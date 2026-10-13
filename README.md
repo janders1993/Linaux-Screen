@@ -4,7 +4,7 @@ Turn any phone or tablet into a second monitor for your Linux desktop — no app
 
 You start the app on the PC, and your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extra (or mirrored) display.
 
-> **Status:** working, used day to day. Runs from the app menu with a tray icon, streams at ~55 fps (1080p) with no noticeable delay, and stops itself when no device is connected. Tested on Bazzite, KDE Plasma, NVIDIA/NVENC, a Galaxy S22 Ultra and an iPad. Touch and keyboard control of the PC, once you accept the device on the PC; pen pressure is planned.
+> **Status:** working, used day to day. Runs from the app menu with a tray icon, streams at ~55 fps (1080p) with no noticeable delay, and stops itself when no device is connected. Tested on Bazzite, KDE Plasma, NVIDIA/NVENC, a Samsung Galaxy and an iPad. Touch and keyboard control of the PC, once you accept the device on the PC.
 
 ## Goals
 
