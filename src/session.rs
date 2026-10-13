@@ -33,6 +33,8 @@ pub enum Signal {
         /// Identifies this build's viewer page. A page left open from an
         /// older build reloads itself when it sees a different value.
         page: String,
+        /// Whether mouse and keyboard control can be requested at all.
+        input: bool,
     },
     /// How many devices are watching, sent whenever it changes.
     Viewers {
@@ -57,6 +59,54 @@ pub enum Signal {
         height: u32,
         dpr: f64,
     },
+    /// The viewer asks to control the PC (from its menu). The PC must accept.
+    #[serde(rename = "request-control")]
+    RequestControl,
+    /// The viewer gives control back.
+    #[serde(rename = "release-control")]
+    ReleaseControl,
+    /// This device's control state: "off", "pending", "on", "denied",
+    /// "cooldown" (with `wait` seconds) or "unavailable".
+    Control {
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait: Option<u64>,
+    },
+    /// Pointer position, 0..1 across the video. Only acted on with control.
+    Pointer {
+        x: f64,
+        y: f64,
+    },
+    /// "left", "right" or "middle" pressed or released.
+    Button {
+        button: String,
+        down: bool,
+    },
+    /// Smooth scroll in the PC's logical pixels; `end` when fingers lift.
+    Scroll {
+        dx: f64,
+        dy: f64,
+        #[serde(default)]
+        end: bool,
+    },
+    /// A physical key by `KeyboardEvent.code`, pressed or released.
+    Key {
+        code: String,
+        down: bool,
+    },
+}
+
+impl Signal {
+    /// Input events, which need the PC's permission.
+    pub fn is_input(&self) -> bool {
+        matches!(
+            self,
+            Signal::Pointer { .. }
+                | Signal::Button { .. }
+                | Signal::Scroll { .. }
+                | Signal::Key { .. }
+        )
+    }
 }
 
 /// One viewer's pipeline. Dropping it stops the stream.
@@ -103,6 +153,20 @@ impl Session {
         let offer_tx = tx.clone();
         webrtc.connect("on-negotiation-needed", false, move |values| {
             let webrtc = values[0].get::<gst::Element>().expect("webrtcbin");
+            // Only negotiate once. Later "negotiation needed" comes from the
+            // video size changing (a monitor mode change), which H.264
+            // carries in-band, so the browser copes without a new offer. A
+            // re-offer also crashed webrtcbin (GStreamer 1.24) once the
+            // audio track was added.
+            if webrtc
+                .property::<Option<gst_webrtc::WebRTCSessionDescription>>(
+                    "current-remote-description",
+                )
+                .is_some()
+            {
+                tracing::debug!("not renegotiating: the stream carries size changes itself");
+                return None;
+            }
             let tx = offer_tx.clone();
             let webrtc_weak = webrtc.downgrade();
             let promise = gst::Promise::with_change_func(move |reply| {
@@ -204,5 +268,27 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.hub.unsubscribe(self.subscription);
         let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Signal;
+
+    #[test]
+    fn input_messages_parse() {
+        let s: Signal = serde_json::from_str(r#"{"type":"request-control"}"#).unwrap();
+        assert!(matches!(s, Signal::RequestControl));
+        let s: Signal =
+            serde_json::from_str(r#"{"type":"key","code":"MetaLeft","down":true}"#).unwrap();
+        assert!(s.is_input());
+        let s: Signal = serde_json::from_str(r#"{"type":"scroll","dx":0,"dy":-12.5}"#).unwrap();
+        assert!(matches!(s, Signal::Scroll { end: false, .. }));
+        let text = serde_json::to_string(&Signal::Control {
+            state: "on".into(),
+            wait: None,
+        })
+        .unwrap();
+        assert_eq!(text, r#"{"type":"control","state":"on"}"#);
     }
 }

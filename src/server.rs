@@ -16,9 +16,10 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::audio::AudioRouter;
-use crate::control::{Control, MAX_VIEWERS};
+use crate::control::{Control, Request, MAX_VIEWERS};
 use crate::display::{self, VirtualDisplay};
 use crate::hub::CaptureHub;
+use crate::input::{self, DeviceInput, InputSink};
 use crate::pipeline::EncoderChoice;
 use crate::session::{Session, Signal};
 
@@ -43,6 +44,7 @@ struct AppState {
     encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
+    input: Option<InputSink>,
 }
 
 pub async fn run(
@@ -52,6 +54,7 @@ pub async fn run(
     encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
     display: Option<Arc<VirtualDisplay>>,
+    input: Option<InputSink>,
 ) -> Result<()> {
     let state = Arc::new(AppState {
         control,
@@ -59,6 +62,7 @@ pub async fn run(
         encoder,
         hub,
         display,
+        input,
     });
 
     let app = Router::new()
@@ -109,6 +113,13 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     let mut audio_rx = state.control.audio_target.subscribe();
     let mut audio_on = false;
     let mut last_count = 0;
+    // Mouse and keyboard: nothing from this device reaches the PC unless
+    // the PC has accepted it (checked on every event below).
+    let mut access_rx = state.control.access.subscribe();
+    let mut control_state = "off"; // what the viewer was last told
+    let mut withdrew = false; // the viewer cancelled its own request
+    let mut device_input = state.input.clone().map(DeviceInput::new);
+    let mut last_ignored: Option<std::time::Instant> = None;
 
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<Signal>();
 
@@ -125,6 +136,7 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     let _ = signal_tx.send(Signal::Info {
         encoder: encoder_name,
         page: page_version().to_owned(),
+        input: state.control.input_available,
     });
 
     let session = match Session::start(&desc, signal_tx, state.hub.clone()) {
@@ -157,6 +169,36 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
                     break;
                 }
             }
+            Ok(()) = access_rx.changed() => {
+                let now = {
+                    let a = access_rx.borrow_and_update();
+                    if a.granted.contains(&peer) {
+                        "on"
+                    } else if a.pending.contains(&peer) {
+                        "pending"
+                    } else {
+                        "off"
+                    }
+                };
+                if now == control_state { continue }
+                if control_state == "on" {
+                    // Control ended: let go of anything still held.
+                    if let Some(d) = device_input.as_mut() { d.release_all() }
+                    tracing::info!("{peer} no longer has control");
+                } else if now == "on" {
+                    tracing::info!("{peer} has control");
+                }
+                let shown = if control_state == "pending" && now == "off" && !withdrew {
+                    "denied"
+                } else {
+                    now
+                };
+                control_state = now;
+                withdrew = false;
+                if !send(&mut ws_tx, &Signal::Control { state: shown.into(), wait: None }).await {
+                    break;
+                }
+            }
             Ok(()) = viewers_rx.changed() => {
                 let count = viewers_rx.borrow_and_update().len();
                 // Names changing doesn't change the count.
@@ -182,6 +224,43 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
                             resize_for(&state, peer, width, height, dpr);
                         }
                     }
+                    Ok(Signal::RequestControl) => {
+                        let reply = match state.control.request_control(peer) {
+                            Request::Pending => {
+                                tokio::spawn(input::ask_host(state.control.clone(), peer));
+                                None
+                            }
+                            // Already sorted; remind the viewer where it stands.
+                            Request::AlreadyPending | Request::Granted => {
+                                Some(Signal::Control { state: control_state.into(), wait: None })
+                            }
+                            Request::Cooldown(wait) => {
+                                Some(Signal::Control { state: "cooldown".into(), wait: Some(wait) })
+                            }
+                            Request::Unavailable => {
+                                Some(Signal::Control { state: "unavailable".into(), wait: None })
+                            }
+                        };
+                        if let Some(reply) = reply {
+                            if !send(&mut ws_tx, &reply).await { break }
+                        }
+                    }
+                    Ok(Signal::ReleaseControl) => {
+                        withdrew = true;
+                        state.control.revoke(peer);
+                    }
+                    Ok(signal) if signal.is_input() => {
+                        match device_input.as_mut() {
+                            Some(d) if state.control.has_control(peer) => apply_input(d, signal),
+                            _ => {
+                                // Not allowed: drop it. Log now and then, not per event.
+                                if last_ignored.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
+                                    tracing::warn!("ignoring input from {peer}: it doesn't have control");
+                                    last_ignored = Some(std::time::Instant::now());
+                                }
+                            }
+                        }
+                    }
                     Ok(Signal::Hello { device }) => {
                         let device: String = device.chars().filter(|c| !c.is_control()).take(40).collect();
                         tracing::info!("{peer} is {device}");
@@ -201,8 +280,27 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
     }
 
     state.audio.unregister(peer);
+    drop(device_input); // lets go of any held keys or buttons
     drop(session);
     tracing::info!("viewer {peer} disconnected");
+}
+
+/// Sends one message; false if the connection is gone.
+async fn send(ws_tx: &mut SplitSink<WebSocket, Message>, signal: &Signal) -> bool {
+    match serde_json::to_string(signal) {
+        Ok(text) => ws_tx.send(Message::Text(text.into())).await.is_ok(),
+        Err(_) => true,
+    }
+}
+
+fn apply_input(input: &mut DeviceInput, signal: Signal) {
+    match signal {
+        Signal::Pointer { x, y } => input.pointer(x, y),
+        Signal::Button { button, down } => input.button(&button, down),
+        Signal::Scroll { dx, dy, end } => input.scroll(dx, dy, end),
+        Signal::Key { code, down } => input.key(&code, down),
+        _ => {}
+    }
 }
 
 /// Tells the viewer we're closing on purpose, so it doesn't keep retrying.

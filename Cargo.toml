@@ -8,7 +8,7 @@ repository = "https://github.com/janders1993/Linaux-Screen"
 
 [dependencies]
 anyhow = "1"
-ashpd = { version = "0.13", features = ["screencast"] }
+ashpd = { version = "0.13", features = ["remote_desktop", "screencast"] }
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"

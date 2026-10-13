@@ -1,6 +1,8 @@
 //! Shared app state for the tray, the viewers and the auto-stop countdown.
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -19,6 +21,38 @@ pub enum Exit {
 
 /// The most devices that can watch at once; more are turned away.
 pub const MAX_VIEWERS: usize = 4;
+
+/// How long a control request waits for an answer on the PC before it
+/// counts as denied.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// After a denial, how long before the same device may ask again.
+pub const DENY_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Which devices may control this PC's mouse and keyboard. Nothing is
+/// allowed until the person at the PC accepts a device's request; approval
+/// lasts until that device disconnects or is revoked.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Access {
+    /// Devices waiting for an answer, oldest first.
+    pub pending: Vec<SocketAddr>,
+    /// Devices that have control.
+    pub granted: Vec<SocketAddr>,
+}
+
+/// What happened to a device's request for control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// Now waiting for the PC to answer.
+    Pending,
+    /// Already waiting; nothing new was asked.
+    AlreadyPending,
+    /// Already has control.
+    Granted,
+    /// Denied recently; may ask again in this many seconds.
+    Cooldown(u64),
+    /// Input isn't available in this session (or the device isn't connected).
+    Unavailable,
+}
 
 /// A connected device.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,6 +87,13 @@ pub struct Control {
     pub audio_available: bool,
     /// The address devices connect to, e.g. `http://192.168.1.20:4444`.
     pub address: String,
+    /// Who may control the PC, and who is asking.
+    pub access: watch::Sender<Access>,
+    /// Whether mouse and keyboard control works at all in this session.
+    pub input_available: bool,
+    /// When each device (by IP, so reconnecting doesn't skip the wait) was
+    /// last denied.
+    denied: Mutex<HashMap<IpAddr, Instant>>,
 }
 
 impl Control {
@@ -70,7 +111,88 @@ impl Control {
             countdown: watch::Sender::new(None),
             exit: watch::Sender::new(None),
             address,
+            access: watch::Sender::new(Access::default()),
+            input_available: false,
+            denied: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_input(mut self, available: bool) -> Self {
+        self.input_available = available;
+        self
+    }
+
+    /// A device asks to control the PC.
+    pub fn request_control(&self, peer: SocketAddr) -> Request {
+        let connected = self.viewers.borrow().iter().any(|v| v.addr == peer);
+        if !self.input_available || !connected {
+            return Request::Unavailable;
+        }
+        {
+            let access = self.access.borrow();
+            if access.granted.contains(&peer) {
+                return Request::Granted;
+            }
+            if access.pending.contains(&peer) {
+                return Request::AlreadyPending;
+            }
+        }
+        if let Some(at) = self.denied.lock().unwrap().get(&peer.ip()) {
+            let left = DENY_COOLDOWN.saturating_sub(at.elapsed());
+            if !left.is_zero() {
+                return Request::Cooldown(left.as_secs().max(1));
+            }
+        }
+        self.access.send_modify(|a| a.pending.push(peer));
+        Request::Pending
+    }
+
+    /// The PC answers a pending request. Returns false if `peer` wasn't
+    /// waiting (already answered, timed out or gone).
+    pub fn answer(&self, peer: SocketAddr, accept: bool) -> bool {
+        let mut was_pending = false;
+        self.access.send_if_modified(|a| {
+            let Some(i) = a.pending.iter().position(|p| *p == peer) else {
+                return false;
+            };
+            a.pending.remove(i);
+            was_pending = true;
+            if accept {
+                a.granted.push(peer);
+            }
+            true
+        });
+        if was_pending && !accept {
+            self.denied
+                .lock()
+                .unwrap()
+                .insert(peer.ip(), Instant::now());
+        }
+        was_pending
+    }
+
+    /// Takes control away from a device (or it gives it up), and drops any
+    /// pending request.
+    pub fn revoke(&self, peer: SocketAddr) {
+        self.access.send_if_modified(|a| {
+            let before = a.pending.len() + a.granted.len();
+            a.pending.retain(|p| *p != peer);
+            a.granted.retain(|p| *p != peer);
+            before != a.pending.len() + a.granted.len()
+        });
+    }
+
+    pub fn has_control(&self, peer: SocketAddr) -> bool {
+        self.access.borrow().granted.contains(&peer)
+    }
+
+    /// The tray-style label for a device, e.g. "iPad (192.168.1.120)".
+    pub fn viewer_label(&self, peer: SocketAddr) -> String {
+        self.viewers
+            .borrow()
+            .iter()
+            .find(|v| v.addr == peer)
+            .map_or_else(|| peer.ip().to_string(), Viewer::label)
     }
 
     pub fn request_exit(&self, why: Exit) {
@@ -135,6 +257,8 @@ pub struct ViewerGuard<'a> {
 impl Drop for ViewerGuard<'_> {
     fn drop(&mut self) {
         let peer = self.peer;
+        // A device's control ends when it disconnects.
+        self.control.revoke(peer);
         // Sound goes back to the PC if this device was playing it.
         self.control.audio_target.send_if_modified(|t| {
             if *t == Some(peer) {
@@ -281,6 +405,74 @@ mod tests {
         assert_eq!(control.viewers.borrow()[0].label(), "iPad (192.168.1.9)");
         drop(ipad);
         assert!(control.is_first_viewer(addr(2)));
+    }
+
+    fn with_input() -> Control {
+        Control::new(String::new()).with_input(true)
+    }
+
+    #[test]
+    fn nothing_is_allowed_until_accepted() {
+        let control = with_input();
+        let _ipad = control.viewer_connected(addr(1)).unwrap();
+        assert!(!control.has_control(addr(1)));
+        assert_eq!(control.request_control(addr(1)), Request::Pending);
+        assert!(!control.has_control(addr(1)), "pending is not approval");
+        assert_eq!(control.request_control(addr(1)), Request::AlreadyPending);
+        assert!(control.answer(addr(1), true));
+        assert!(control.has_control(addr(1)));
+        assert_eq!(control.request_control(addr(1)), Request::Granted);
+    }
+
+    #[test]
+    fn unavailable_without_input_or_connection() {
+        let control = Control::new(String::new());
+        let _ipad = control.viewer_connected(addr(1)).unwrap();
+        assert_eq!(control.request_control(addr(1)), Request::Unavailable);
+        let control = with_input();
+        assert_eq!(control.request_control(addr(1)), Request::Unavailable);
+        assert!(control.access.borrow().pending.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn denial_has_a_cooldown_even_after_reconnecting() {
+        let control = with_input();
+        let ipad = control.viewer_connected(addr(1)).unwrap();
+        control.request_control(addr(1));
+        assert!(control.answer(addr(1), false));
+        assert!(!control.has_control(addr(1)));
+        assert!(
+            !control.answer(addr(1), true),
+            "can't accept an answered request"
+        );
+        assert!(!control.has_control(addr(1)));
+        assert!(matches!(
+            control.request_control(addr(1)),
+            Request::Cooldown(_)
+        ));
+        drop(ipad);
+        let _again = control.viewer_connected(addr(2)).unwrap(); // same IP, new port
+        assert!(matches!(
+            control.request_control(addr(2)),
+            Request::Cooldown(_)
+        ));
+        tokio::time::sleep(DENY_COOLDOWN).await;
+        assert_eq!(control.request_control(addr(2)), Request::Pending);
+    }
+
+    #[test]
+    fn control_ends_on_disconnect_and_revoke() {
+        let control = with_input();
+        let ipad = control.viewer_connected(addr(1)).unwrap();
+        let _phone = control.viewer_connected(addr(2)).unwrap();
+        control.request_control(addr(1));
+        control.answer(addr(1), true);
+        control.request_control(addr(2));
+        drop(ipad);
+        assert!(!control.has_control(addr(1)));
+        assert_eq!(control.access.borrow().pending, vec![addr(2)]);
+        control.revoke(addr(2));
+        assert_eq!(*control.access.borrow(), Access::default());
     }
 
     #[test]

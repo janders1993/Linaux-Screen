@@ -4,7 +4,7 @@ Turn any phone or tablet into a second monitor for your Linux desktop — no app
 
 You start the app on the PC, and your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extra (or mirrored) display.
 
-> **Status:** working, used day to day. Runs from the app menu with a tray icon, streams at ~55 fps (1080p) with no noticeable delay, and stops itself when no device is connected. Tested on Bazzite, KDE Plasma, NVIDIA/NVENC, a Galaxy S22 Ultra and an iPad. Display only; touch input is planned for later.
+> **Status:** working, used day to day. Runs from the app menu with a tray icon, streams at ~55 fps (1080p) with no noticeable delay, and stops itself when no device is connected. Tested on Bazzite, KDE Plasma, NVIDIA/NVENC, a Galaxy S22 Ultra and an iPad. Touch and keyboard control of the PC, once you accept the device on the PC; pen pressure is planned.
 
 ## Goals
 
@@ -37,8 +37,9 @@ Capture runs in its own pipeline for the life of the app and hands frames to one
 | Viewer | One plain HTML/JS page served by the app |
 | Running | App-menu entry; tray icon while running; stops after a minute with no device |
 | Sound | A "Linaux Screen" PipeWire speaker, made the default output while a device is picked → Opus in the same WebRTC session |
+| Input | RemoteDesktop portal (same session as the screencast); events over the WebSocket, only from devices accepted on the PC |
 
-Planned, not built yet: touch/keyboard input (RemoteDesktop portal), pen pressure (uinput).
+Planned, not built yet: pen pressure (uinput).
 
 ## Requirements
 
@@ -55,7 +56,8 @@ Ordered by what matters most day to day; each step is a GitHub issue.
 - [x] **Run without a terminal**: app-menu entry, tray icon, auto-stop (#8)
 - [x] **Sound**: send the PC's sound to a chosen device from the tray (#3)
 - [x] **Several devices at once**: all mirror the same screen (#6)
-- [ ] **Input**: touchscreen tap/drag and iPad keyboard (#2), then pen pressure (#5)
+- [x] **Input**: touch as mouse and hardware keyboards, accepted per device on the PC (#2)
+- [ ] **Pen pressure** (#5)
 - [ ] **Later**: match the monitor to the device (#4, experimental `--fit-device` flag), video wall (#10)
 
 ## Setup
@@ -110,7 +112,7 @@ distrobox enter linaux -- bash -c 'cd ~/Linaux-Screen && git pull'
 
 ## Using it
 
-1. **Start it on the PC.** Open **Linaux Screen** from the app menu or KRunner (Alt+Space). The first time, KDE asks to allow screen sharing. A notification shows the address, and a tray icon appears while it's running.
+1. **Start it on the PC.** Open **Linaux Screen** from the app menu or KRunner (Alt+Space). The first time, KDE asks to allow screen sharing and remote control (that covers mouse and keyboard; no device can use them until you accept it, see below). A notification shows the address, and a tray icon appears while it's running.
 2. **On the phone or tablet,** open the address, e.g. `http://192.168.1.20:4444`. Saving it as a home-screen bookmark makes this one tap. Tap the video for fullscreen (Android).
 3. **When you're done,** just close the page or put the device down. A minute after the last device disconnects, the app stops by itself and the virtual monitor disappears. Nothing counts down while it's waiting for the first device.
 
@@ -120,6 +122,7 @@ The **tray menu** shows who's connected, e.g. *iPad (192.168.1.120)*, and has:
 - **Copy address**
 - **Restart**: also picks up a newly installed version.
 - **Sound output**: *This PC (default)* or any connected device. Picking a device moves all the PC's sound to it and the PC goes quiet. Sound goes back to the PC when you pick *This PC*, the device disconnects, or the app stops or restarts. Nothing changes until you pick.
+- **Control requests**: *iPad wants to control this PC* with **Accept** / **Deny**, and *iPad has control — Revoke* while it does.
 - **Disconnect all devices**: they show "tap to reconnect".
 - **Stop**
 
@@ -127,7 +130,15 @@ A new monitor appears in **System Settings → Display** while it runs. Drag it 
 
 The virtual monitor starts at 1920×1080, letterboxed on the device. You can change its resolution and scale in **System Settings → Display Configuration** (it's listed as *Virtual Output*). KDE remembers the setting, so it's applied every time the app starts. `--fit-device` (experimental) resizes it automatically to match the device and follows rotation, but resizing mid-stream costs a lot of frame rate on KDE + NVIDIA (#4).
 
-On the device: tap with **three fingers** (or press `s`) to show stats: resolution, fps, bitrate, buffer and decode time, how many devices are connected, and whether sound is on. When a device is picked for sound, it may show **Tap to enable sound**, because browsers only play sound after a tap.
+On the device: tap with **three fingers** (or press `s`) to show the menu: stats (resolution, fps, bitrate, buffer and decode time, devices connected, sound, control) and the **Request control** button. When a device is picked for sound, it may show **Tap to enable sound**, because browsers only play sound after a tap.
+
+**Controlling the PC from a device.** Nothing a device does reaches the PC until you allow it:
+1. On the device, tap with three fingers and press **Request control**. (It's only in that menu, so it can't happen by accident.)
+2. On the PC, a notification asks *Allow control of this PC?* with **Accept** / **Deny** (also in the tray). No answer in 30 seconds counts as Deny; after a Deny the device must wait 30 seconds to ask again.
+3. While it has control: **tap** to click, **hold** (half a second) to right-click, **drag one finger** to drag (windows, selections), **drag two fingers** to scroll. A **trackpad or mouse** (e.g. the iPad's Magic Keyboard) works like on a PC: the pointer follows it, clicks and two-finger clicks are left and right clicks, two-finger swipes scroll. A physically connected keyboard types on the PC; the iPad's **Cmd** key is the Super (Windows) key. There's no on-screen keyboard. Three-finger taps always open the menu and never reach the PC.
+4. Control ends when the device presses **Release control**, disconnects, or you pick **Revoke**, **Disconnect all**, **Restart** or **Stop**. Each device asks separately.
+
+iPadOS keeps a few Cmd shortcuts for itself (Cmd+Tab, Cmd+Space, Cmd+H), so those don't reach the PC. Before control is granted, taps just go fullscreen as before.
 
 **Running from a terminal** works too: `linaux-screen` (with any options below). Logs always go to `~/.local/state/linaux-screen/linaux-screen.log`.
 
