@@ -27,6 +27,12 @@
     display: block; width: 100%; margin-top: 8px; padding: 10px 12px; border: 1px solid #4a6;
     border-radius: 6px; background: #142; color: #dfe; font: inherit; font-size: 15px;
   }
+  #quality { display: flex; gap: 4px; margin-top: 8px; }
+  #quality button {
+    flex: 1; padding: 8px 4px; border: 1px solid #456; border-radius: 6px;
+    background: #123; color: #cde; font: inherit; font-size: 13px;
+  }
+  #quality button.on { background: #2a5; border-color: #4c7; color: #fff; }
   #ctl.on { background: #431; border-color: #c74; }
   #ctl:disabled { opacity: .5; }
   /* While controlling, the PC's own cursor is in the video; hide the
@@ -55,7 +61,7 @@
 <body>
 <video id="video" autoplay playsinline muted></video>
 <div id="status">Connecting…</div>
-<div id="hud" class="hidden"><div id="stats">Waiting for video…</div><button id="ctl" type="button">Request control</button></div>
+<div id="hud" class="hidden"><div id="stats">Waiting for video…</div><div id="quality"><button type="button" data-p="saver">Battery saver</button><button type="button" data-p="smooth" class="on">Smooth</button><button type="button" data-p="sharp">Sharp</button><button type="button" data-p="ultra">Ultra</button></div><button id="ctl" type="button">Request control</button></div>
 <div id="hint" class="hidden">Tap the screen for fullscreen</div>
 <div id="sound" class="hidden">🔊 Tap to enable sound</div>
 <script>
@@ -87,6 +93,9 @@ let control = "off";        // off | pending | on
 let retryAt = 0;            // after a denial: when asking again is allowed
 let controlNote = "";       // e.g. "Denied on the PC"
 let releasing = false;      // this device gave control back itself
+// Stream quality for this device only. Every connection starts on Smooth.
+let quality = "smooth";
+let qualityKbps = 0;
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -158,6 +167,8 @@ function connect() {
       setAudio(msg.on);
     } else if (msg.type === "viewers") {
       devices = msg.count;
+    } else if (msg.type === "quality") {
+      showQuality(msg.preset, msg.kbps || 0);
     } else if (msg.type === "control") {
       if (msg.state === "denied" || msg.state === "cooldown") {
         retryAt = Date.now() + 1000 * (msg.wait || 30);
@@ -181,6 +192,7 @@ function connect() {
 
   ws.onopen = () => {
     ended = null;
+    showQuality("smooth", 0);
     ws.send(JSON.stringify({ type: "hello", device: deviceName() }));
     sendDisplay();
   };
@@ -306,6 +318,7 @@ setInterval(async () => {
       `${(kbps / 1000).toFixed(1)} Mbit/s  ${encoder}\n` +
       `buffer ${jitterMs.toFixed(0)} ms  decode ${decodeMs.toFixed(1)} ms\n` +
       `lost ${r.packetsLost ?? 0}  dropped ${r.framesDropped ?? 0}\n` +
+      `quality ${QUALITY_NAMES[quality] || quality}${qualityKbps ? ` (${(qualityKbps / 1000).toFixed(0)} Mbit/s target)` : ""}\n` +
       `devices connected ${devices}  sound ${audioOn ? "on" : "off"}\n` +
       `control ${control === "on" ? "ON — touches click on the PC" : control}`;
     last = r;
@@ -344,6 +357,18 @@ function updateControlButton() {
   else if (control === "pending") ctlBtn.textContent = "Waiting for the PC… (tap to cancel)";
   else if (wait > 0) ctlBtn.textContent = `${controlNote || "Denied"} — ask again in ${wait}s`;
   else ctlBtn.textContent = controlNote ? `${controlNote} — Request control` : "Request control";
+}
+
+const QUALITY_NAMES = { saver: "Battery saver", smooth: "Smooth", sharp: "Sharp", ultra: "Ultra" };
+function showQuality(preset, kbps) {
+  quality = preset;
+  qualityKbps = kbps;
+  for (const b of document.querySelectorAll("#quality button")) {
+    b.classList.toggle("on", b.dataset.p === preset);
+  }
+}
+for (const b of document.querySelectorAll("#quality button")) {
+  b.addEventListener("click", () => send({ type: "quality", preset: b.dataset.p }));
 }
 
 ctlBtn.addEventListener("click", () => {

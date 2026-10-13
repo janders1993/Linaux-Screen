@@ -98,6 +98,8 @@ fn encoder(kind: EncoderKind, bitrate_kbps: u32) -> Result<(String, String)> {
             _ => None,
         };
         if let Some(desc) = desc {
+            // Named so the bitrate can be changed while streaming.
+            let desc = desc.replacen(name, &format!("{name} name=enc"), 1);
             return Ok((name.to_owned(), desc));
         }
         tracing::debug!("encoder {name} not available");

@@ -11,6 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::hub::CaptureHub;
 use crate::pipeline;
+use crate::quality::Preset;
 
 /// Messages exchanged with the browser over the WebSocket.
 #[derive(Debug, Serialize, Deserialize)]
@@ -52,6 +53,13 @@ pub enum Signal {
     /// reconnect by itself. `reason` is "disconnected", "stopped" or "full".
     Bye {
         reason: String,
+    },
+    /// Stream quality preset: "saver", "smooth", "sharp" or "ultra". The
+    /// viewer asks; the server confirms with the resulting bitrate.
+    Quality {
+        preset: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kbps: Option<u32>,
     },
     /// The viewer's screen in physical pixels, sent on connect and rotation.
     Display {
@@ -115,13 +123,22 @@ pub struct Session {
     webrtc: gst::Element,
     hub: Arc<CaptureHub>,
     subscription: u64,
+    encoder: Option<gst::Element>,
+    /// The automatic (Smooth) bitrate the stream started with.
+    base_kbps: u32,
     /// Where this device's audio goes in, while it's the chosen output.
     pub audio_src: gst_app::AppSrc,
 }
 
 impl Session {
-    pub fn start(desc: &str, tx: UnboundedSender<Signal>, hub: Arc<CaptureHub>) -> Result<Self> {
+    pub fn start(
+        desc: &str,
+        base_kbps: u32,
+        tx: UnboundedSender<Signal>,
+        hub: Arc<CaptureHub>,
+    ) -> Result<Self> {
         let pipeline = pipeline::parse(desc)?;
+        let encoder = pipeline.by_name("enc");
         let webrtc = pipeline
             .by_name("webrtc")
             .context("webrtcbin missing from pipeline")?;
@@ -231,8 +248,25 @@ impl Session {
             webrtc,
             hub,
             subscription,
+            encoder,
+            base_kbps,
             audio_src,
         })
+    }
+
+    /// Switches this device's stream to `preset` straight away (no
+    /// reconnect). Returns the new bitrate.
+    pub fn set_quality(&self, preset: Preset) -> u32 {
+        let kbps = preset.kbps(self.base_kbps);
+        match &self.encoder {
+            Some(enc) if enc.find_property("bitrate").is_some() => {
+                let value = preset.encoder_kbps(self.base_kbps);
+                enc.set_property_from_str("bitrate", &value.to_string());
+            }
+            _ => tracing::warn!("can't change the bitrate of this encoder"),
+        }
+        self.hub.set_max_fps(self.subscription, preset.max_fps());
+        kbps
     }
 
     pub fn handle(&self, signal: Signal) -> Result<()> {

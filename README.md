@@ -130,7 +130,18 @@ A new monitor appears in **System Settings → Display** while it runs. Drag it 
 
 The virtual monitor starts at 1920×1080, letterboxed on the device. You can change its resolution and scale in **System Settings → Display Configuration** (it's listed as *Virtual Output*). KDE remembers the setting, so it's applied every time the app starts. `--fit-device` (experimental) resizes it automatically to match the device and follows rotation, but resizing mid-stream costs a lot of frame rate on KDE + NVIDIA (#4).
 
-On the device: tap with **three fingers** (or press `s`) to show the menu: stats (resolution, fps, bitrate, buffer and decode time, devices connected, sound, control) and the **Request control** button. When a device is picked for sound, it may show **Tap to enable sound**, because browsers only play sound after a tap.
+On the device: tap with **three fingers** (or press `s`) to show the menu: stats (resolution, fps, bitrate, buffer and decode time, quality, devices connected, sound, control), the **quality** buttons and the **Request control** button.
+
+**Quality** is per device and switches instantly; every connection starts on Smooth:
+
+| Preset | fps | Bitrate (1080p) | For |
+|---|---|---|---|
+| Battery saver | 30 | ~6 Mbit/s | Long sessions, weak Wi-Fi |
+| **Smooth** (default) | 60 | ~12 Mbit/s | Everyday use |
+| Sharp | 60 | ~18 Mbit/s | Text-heavy work on good Wi-Fi |
+| Ultra | 60 | ~36 Mbit/s (up to 80) | Strong Wi-Fi 6 or a wired iPad |
+
+Bitrates scale with the virtual monitor's resolution (e.g. Ultra at 1440p is about 60 Mbit/s). When a device is picked for sound, it may show **Tap to enable sound**, because browsers only play sound after a tap.
 
 **Controlling the PC from a device.** Nothing a device does reaches the PC until you allow it:
 1. On the device, tap with three fingers and press **Request control**. (It's only in that menu, so it can't happen by accident.)
