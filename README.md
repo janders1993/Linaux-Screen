@@ -135,7 +135,7 @@ On the device: tap with **three fingers** (or press `s`) to show the menu: stats
 **Controlling the PC from a device.** Nothing a device does reaches the PC until you allow it:
 1. On the device, tap with three fingers and press **Request control**. (It's only in that menu, so it can't happen by accident.)
 2. On the PC, a notification asks *Allow control of this PC?* with **Accept** / **Deny** (also in the tray). No answer in 30 seconds counts as Deny; after a Deny the device must wait 30 seconds to ask again.
-3. While it has control: **tap** to click, **hold** (half a second) to right-click, **drag one finger** to drag (windows, selections), **drag two fingers** to scroll. A physically connected keyboard types on the PC; the iPad's **Cmd** key is the Super (Windows) key. There's no on-screen keyboard. Three-finger taps always open the menu and never reach the PC.
+3. While it has control: **tap** to click, **hold** (half a second) to right-click, **drag one finger** to drag (windows, selections), **drag two fingers** to scroll. A **trackpad or mouse** (e.g. the iPad's Magic Keyboard) works like on a PC: the pointer follows it, clicks and two-finger clicks are left and right clicks, two-finger swipes scroll. A physically connected keyboard types on the PC; the iPad's **Cmd** key is the Super (Windows) key. There's no on-screen keyboard. Three-finger taps always open the menu and never reach the PC.
 4. Control ends when the device presses **Release control**, disconnects, or you pick **Revoke**, **Disconnect all**, **Restart** or **Stop**. Each device asks separately.
 
 iPadOS keeps a few Cmd shortcuts for itself (Cmd+Tab, Cmd+Space, Cmd+H), so those don't reach the PC. Before control is granted, taps just go fullscreen as before.

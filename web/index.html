@@ -29,6 +29,9 @@
   }
   #ctl.on { background: #431; border-color: #c74; }
   #ctl:disabled { opacity: .5; }
+  /* While controlling, the PC's own cursor is in the video; hide the
+     device's pointer (iPad trackpad / mouse) so there aren't two. */
+  body.controlling video { cursor: none; }
   #status {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     text-align: center; padding: 24px; font-size: 16px; color: #8ab;
@@ -327,6 +330,7 @@ function sendInput(msg) {
 function setControl(state, note = "") {
   if (control === "on" && state !== "on") releaseHeld();
   control = state;
+  document.body.classList.toggle("controlling", state === "on");
   controlNote = note;
   updateControlButton();
 }
@@ -458,6 +462,46 @@ function endGesture(e, cancelled) {
 document.addEventListener("touchend", (e) => endGesture(e, false), { passive: false });
 document.addEventListener("touchcancel", (e) => endGesture(e, true), { passive: false });
 
+// A trackpad or mouse (iPad Magic Keyboard, Bluetooth mouse): the pointer
+// follows it, buttons click as they are, two-finger swipes scroll. Touch and
+// pen go through the touch gestures above instead.
+const MOUSE_BUTTONS = { 0: "left", 1: "middle", 2: "right" };
+const mouseHeld = new Set();
+function isMouse(e) { return e.pointerType === "mouse"; }
+document.addEventListener("pointermove", (e) => {
+  if (control === "on" && isMouse(e)) movePointer(e);
+});
+document.addEventListener("pointerdown", (e) => {
+  const button = MOUSE_BUTTONS[e.button];
+  if (control !== "on" || !isMouse(e) || inMenu(e) || !button) return;
+  e.preventDefault();
+  movePointer(e);
+  mouseHeld.add(button);
+  sendInput({ type: "button", button, down: true });
+});
+document.addEventListener("pointerup", (e) => {
+  const button = MOUSE_BUTTONS[e.button];
+  if (!isMouse(e) || !mouseHeld.delete(button)) return;
+  e.preventDefault();
+  movePointer(e);
+  sendInput({ type: "button", button, down: false });
+});
+// Right-click / two-finger click: the PC shows its menu, not the iPad.
+document.addEventListener("contextmenu", (e) => {
+  if (control === "on") e.preventDefault();
+});
+let wheelEnd = null;
+document.addEventListener("wheel", (e) => {
+  if (control !== "on" || inMenu(e)) return;
+  e.preventDefault();
+  const p = toScreen(e);
+  // Pixels on the page → PC pixels; "lines" mode is rare (some mice).
+  const k = (p ? p.scale : 1) * (e.deltaMode === 1 ? 40 : 1);
+  sendInput({ type: "scroll", dx: e.deltaX * k, dy: e.deltaY * k });
+  clearTimeout(wheelEnd);
+  wheelEnd = setTimeout(() => sendInput({ type: "scroll", dx: 0, dy: 0, end: true }), 150);
+}, { passive: false });
+
 // Physical keyboards only. Keys go by position (KeyboardEvent.code), so the
 // PC's keyboard layout decides the character. The iPad's Cmd key is Super.
 const held = new Set();
@@ -467,6 +511,8 @@ function releaseHeld() {
     send({ type: "key", code, down: false });
   }
   if (gesture && gesture.mode === "drag") send({ type: "button", button: "left", down: false });
+  for (const button of mouseHeld) send({ type: "button", button, down: false });
+  mouseHeld.clear();
   gesture = null;
 }
 document.addEventListener("keydown", (e) => {
