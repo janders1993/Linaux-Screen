@@ -37,6 +37,11 @@ fi
 
 say "Building $TAG…"
 [[ -f ~/.cargo/env ]] && source ~/.cargo/env
+# Keep this machine's paths (and so the username) out of the binary.
+RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$REPO=linaux-screen"
+RUSTFLAGS+=" --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=cargo"
+RUSTFLAGS+=" --remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=rustup"
+export RUSTFLAGS
 cargo build --release --locked
 
 # GStreamer's nicesrc, which Bazzite lacks; install.sh adds it only if needed.
