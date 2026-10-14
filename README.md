@@ -1,173 +1,133 @@
 # Linaux Screen
 
-Turn any phone or tablet into a second monitor for your Linux desktop — no app install on the device. Inspired by spacedesk, built for KDE Plasma on Wayland (developed and tested on Bazzite).
+**Turn your phone or tablet into a second monitor for your Linux PC, wirelessly, with nothing to install on the device.**
 
-You start the app on the PC, and your iPad, iPhone or Android device opens `http://<your-pc-ip>:4444` in the browser and becomes an extra (or mirrored) display.
+Linaux Screen adds a real extra monitor to your KDE Plasma desktop and shows it in your device's web browser. Drag windows onto it, play the PC's sound through it, and, if you allow it, control the PC with touch, a trackpad or a keyboard. Think *spacedesk*, but for Linux.
 
-> **Status:** working, used day to day. Runs from the app menu with a tray icon, streams at ~55 fps (1080p) with no noticeable delay, and stops itself when no device is connected. Tested on Bazzite, KDE Plasma, NVIDIA/NVENC, a Samsung Galaxy and an iPad. Touch, trackpad and keyboard control of the PC, once you accept the device on the PC, and per-device quality presets.
+It's built for KDE Plasma 6 on Wayland and developed on [Bazzite](https://bazzite.gg). Day to day it runs at around 55–60 fps at 1080p over home Wi-Fi, with no noticeable delay.
 
-## Goals
+## Features
 
-- **Extend** — a real virtual monitor in KDE's display settings, shown on your devices (up to four, all seeing the same screen).
-- **Mirror** — duplicate an existing monitor to a device.
-- **Input** — touch as mouse, trackpads and physical keyboards, only for devices you accept on the PC.
-- **Audio** — desktop audio plays on the device.
-- **Zero install on clients** — any modern browser on iOS or Android; tap the video for fullscreen.
-- **Low latency** — hardware H.264 encoding, WebRTC transport, target under 60 ms on a good LAN.
-- **Wireless only:** no USB mode; the point is several devices over Wi-Fi. A video wall is a stretch goal.
+- **A real second screen.** A new monitor appears in KDE's Display settings. Arrange it, set its resolution, and drag windows onto it like any plugged-in screen.
+- **No app on the device.** Open an address in the browser on an iPad, iPhone, Android phone or tablet, or even another laptop.
+- **Several devices at once.** Up to four devices can watch the same screen together.
+- **Sound to a device.** Send the PC's sound to any connected device from the tray. It goes back to the PC the moment you switch back or the device leaves.
+- **Touch, trackpad and keyboard control.** Tap to click, drag windows, scroll, and type on a Bluetooth keyboard. Off until you say so: each device has to ask, and you Accept or Deny on the PC.
+- **Quality presets per device.** Battery saver, Smooth, Sharp or Ultra, switched instantly from the device.
+- **Fast.** Hardware video encoding (NVIDIA, AMD or Intel) streamed over WebRTC.
+- **Stays out of the way.** It starts only when you open it and lives in the system tray. It stops by itself a minute after the last device disconnects. Nothing runs at login.
 
-## How it works
+## What you need
 
-```
- KWin virtual output ──► PipeWire ──► capture pipeline (runs from launch)
-                                            │  NV12 frames
-                                            ▼
-                         per-device pipeline: NVENC / VA-API H.264 ──► WebRTC ──► browser
-```
+- **A Linux PC with KDE Plasma 6 on Wayland.** The ready-made download is built for Bazzite and other Fedora 44–based systems. On other distributions, [build it from source](docs/DEVELOPMENT.md).
+- **Ideally a graphics card that can encode H.264.** Almost any NVIDIA, AMD or Intel GPU from the last decade can. Without one it falls back to the CPU.
+- **A phone, tablet or laptop with a modern browser** (Safari, Chrome, Firefox or Edge), on the same network as the PC.
 
-Capture runs in its own pipeline for the life of the app and hands frames to one encoding pipeline per connected device. (Keeping them separate was the fix for KDE delivering ~1 fps — see issue #1.)
+The PC side is Linux only. On Windows, use spacedesk.
 
-| Piece | Technology |
-|---|---|
-| Virtual monitor | KWin virtual output via the ScreenCast portal (virtual source type) |
-| Capture | PipeWire → GStreamer, colour-converted to NV12 |
-| Encode | GStreamer: `nvh264enc` (NVIDIA), `vah264enc` (AMD/Intel) or `x264enc` (software) |
-| Transport | WebRTC (`webrtcbin`), signalling over a WebSocket |
-| Server | Rust: `ashpd`, `gstreamer-rs`, `axum`; tray icon via `ksni` |
-| Viewer | One plain HTML/JS page served by the app |
-| Running | App-menu entry; tray icon while running; stops after a minute with no device |
-| Sound | A "Linaux Screen" PipeWire speaker, made the default output while a device is picked → Opus in the same WebRTC session |
-| Input | RemoteDesktop portal (same session as the screencast); events over the WebSocket, only from devices accepted on the PC |
+## Install
 
-## Requirements
+1. **Download** `linaux-screen-<version>-x86_64.tar.gz` from the [latest release](https://github.com/janders1993/Linaux-Screen/releases/latest).
+2. **Unpack it and run the installer** in a terminal:
+   ```bash
+   tar xf linaux-screen-*-x86_64.tar.gz
+   cd linaux-screen-*/
+   ./install.sh
+   ```
+   This puts the app in `~/.local/bin` and adds **Linaux Screen** to your app menu. It needs no root and no reboot, and installs nothing system-wide.
 
-- KDE Plasma 6 on Wayland, with PipeWire and xdg-desktop-portal-kde
-- A GPU with hardware H.264 encoding (or a CPU to spare for software encoding)
-- For sound: `pactl` and `pw-cli` (PipeWire tools, normally preinstalled)
-- The phone/tablet on the same network, with a modern browser
+   It also checks that your PC has everything needed for streaming, and tells you if anything is missing. On Bazzite it adds one small streaming component Bazzite doesn't include (GStreamer's `nicesrc`), into your home folder.
 
-## Roadmap
+**Updating:** download the new release and run its `./install.sh`. If the app is running, choose **Restart** in its tray menu to switch to the new version.
 
-Ordered by what matters most day to day; each step is a GitHub issue.
-
-- [x] **Spike** — virtual monitor streamed to a phone browser (#1)
-- [x] **Run without a terminal**: app-menu entry, tray icon, auto-stop (#8)
-- [x] **Sound**: send the PC's sound to a chosen device from the tray (#3)
-- [x] **Several devices at once**: all mirror the same screen (#6)
-- [x] **Input**: touch as mouse, trackpads and hardware keyboards, accepted per device on the PC (#2)
-- [x] **Quality presets**: Battery saver / Smooth / Sharp / Ultra per device (#21)
-- [ ] **Parked**: switch between Extend and Mirror from the device (#20), pinch to zoom (#22), video wall (#10)
-
-## Setup
-
-Bazzite is immutable, so build inside a Fedora distrobox (matching Bazzite's Fedora version), then run the binary on the host. Running on the host means you get Bazzite's GStreamer, including its hardware H.264 encoders, which plain Fedora leaves out.
-
-**Build** (once, and after each `git pull`):
-
-```bash
-distrobox create --name linaux --image registry.fedoraproject.org/fedora:$(rpm -E %fedora)
-distrobox enter linaux
-
-sudo dnf install -y git gh gcc pkgconf-pkg-config dbus-devel \
-  gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-bad-free-devel
-curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y && source ~/.cargo/env
-
-git clone https://github.com/janders1993/Linaux-Screen ~/Linaux-Screen
-cd ~/Linaux-Screen && cargo build --release
-exit
-```
-
-**Check the host has the runtime pieces** (in a normal Bazzite terminal):
-
-```bash
-for e in webrtcbin nicesrc pipewiresrc dtlsenc srtpenc vah264enc nvh264enc x264enc; do gst-inspect-1.0 $e >/dev/null 2>&1 && echo "OK      $e" || echo "MISSING $e"; done
-```
-
-You need `webrtcbin`, `nicesrc`, `pipewiresrc`, `dtlsenc` and `srtpenc`, plus at least one encoder (`vah264enc` on AMD/Intel, `nvh264enc` on NVIDIA, or `x264enc`). If any are missing, open an issue with the output.
-
-Bazzite doesn't ship `nicesrc`. Copy it from the box into your user plugin folder (no reboot or layering needed):
-
-```bash
-distrobox enter linaux -- sudo dnf install -y libnice-gstreamer1
-mkdir -p ~/.local/share/gstreamer-1.0/plugins
-distrobox enter linaux -- cp /usr/lib64/gstreamer-1.0/libgstnice.so ~/.local/share/gstreamer-1.0/plugins/
-```
-
-**Install** (on the host, after building):
-
-```bash
-~/Linaux-Screen/scripts/install.sh --no-build
-```
-
-This puts the app in `~/.local/bin` and adds **Linaux Screen** to the app menu. Nothing starts at login. To update later, pull inside the box (that's where you're signed in to GitHub), then re-run the script without `--no-build`; it rebuilds in the box first:
-
-```bash
-distrobox enter linaux -- bash -c 'cd ~/Linaux-Screen && git pull'
-~/Linaux-Screen/scripts/install.sh
-```
-
-`scripts/install.sh --uninstall` removes it again.
+**Uninstalling:** `./install.sh --uninstall`. Your settings in `~/.config/linaux-screen` are left in place, in case you come back.
 
 ## Using it
 
-1. **Start it on the PC.** Open **Linaux Screen** from the app menu or KRunner (Alt+Space). The first time, KDE asks to allow screen sharing and remote control (that covers mouse and keyboard; no device can use them until you accept it, see below). A notification shows the address, and a tray icon appears while it's running.
-2. **On the phone or tablet,** open the address, e.g. `http://192.168.1.20:4444`. Saving it as a home-screen bookmark makes this one tap. Tap the video for fullscreen (Android).
-3. **When you're done,** just close the page or put the device down. A minute after the last device disconnects, the app stops by itself and the virtual monitor disappears. Nothing counts down while it's waiting for the first device.
+### Connect a device
 
-Several devices can watch at once (up to four). They all see the same screen, each scaled to fit with black bars where the shapes differ.
+1. **On the PC,** open **Linaux Screen** from the app menu (or KRunner, Alt+Space). The first time, KDE asks you to allow screen sharing and remote control. The app remembers your answer, so you're normally only asked once. Allowing remote control here doesn't let any device in by itself; see [Controlling the PC](#controlling-the-pc).
+2. A notification shows the address, like `http://192.168.1.20:4444`. A tray icon appears while it runs, and its menu can copy the address for you.
+3. **On the device,** open that address in the browser. Tap the screen to go fullscreen. A home-screen bookmark makes this one tap next time.
 
-The **tray menu** shows who's connected, e.g. *iPad (192.168.1.120)*, and has:
+**When you're done,** close the browser tab. A minute after the last device leaves, the app stops by itself and the extra monitor disappears.
+
+### Arrange the screen
+
+While the app runs there's a new monitor, *Virtual Output*, in **System Settings → Display Configuration**. Drag it to where it sits relative to your other screens, and set its resolution and scale; 2560×1440 suits a 13" iPad well. KDE remembers these settings for next time. If you change the resolution while the app is running, choose **Restart** in the tray.
+
+All connected devices show the same screen, scaled to fit, with black bars where the shapes differ.
+
+### The tray menu
+
+- **Who's connected:** for example *iPad (192.168.1.120)*.
 - **Copy address**
-- **Restart**: also picks up a newly installed version.
-- **Sound output**: *This PC (default)* or any connected device. Picking a device moves all the PC's sound to it and the PC goes quiet. Sound goes back to the PC when you pick *This PC*, the device disconnects, or the app stops or restarts. Nothing changes until you pick.
-- **Control requests**: *iPad wants to control this PC* with **Accept** / **Deny**, and *iPad has control — Revoke* while it does.
-- **Disconnect all devices**: they show "tap to reconnect".
+- **Sound output:** *This PC*, or any connected device. Nothing changes until you pick. Sound goes back to the PC when you pick *This PC*, the device disconnects, or the app stops.
+- **Control requests:** *iPad wants to control this PC*, with **Accept** / **Deny**. While a device has control: *iPad has control — Revoke*.
+- **Restart:** also switches to a newly installed version.
+- **Disconnect all devices**
 - **Stop**
 
-A new monitor appears in **System Settings → Display** while it runs. Drag it to where you want it relative to your other screens.
+### The device menu
 
-The virtual monitor starts at 1920×1080, letterboxed on the device. You can change its resolution and scale in **System Settings → Display Configuration** (it's listed as *Virtual Output*). KDE remembers the setting, so it's applied every time the app starts. If you change it while the app is running, use **Restart** in the tray so the stream picks up the new size.
+Tap the screen with **three fingers** to open the menu on the device (or press `s` on a keyboard, when not controlling the PC). It shows connection stats and has:
 
-On the device: tap with **three fingers** (or press `s`) to show the menu: stats (resolution, fps, bitrate, buffer and decode time, quality, devices connected, sound, control), the **quality** buttons and the **Request control** button.
+**Quality buttons.** Each device picks its own quality, and it changes instantly. Every visit starts on Smooth.
 
-**Quality** is per device and switches instantly; every connection starts on Smooth:
-
-| Preset | fps | Bitrate (1080p) | For |
+| Preset | Frame rate | Data at 1080p | Good for |
 |---|---|---|---|
-| Battery saver | 30 | ~6 Mbit/s | Long sessions, weak Wi-Fi |
-| **Smooth** (default) | 60 | ~12 Mbit/s | Everyday use |
-| Sharp | 60 | ~18 Mbit/s | Text-heavy work on good Wi-Fi |
-| Ultra | 60 | ~36 Mbit/s (up to 80) | Strong Wi-Fi 6 or a wired iPad |
+| Battery saver | 30 fps | ~6 Mbit/s | Long sessions, weaker Wi-Fi |
+| **Smooth** | 60 fps | ~12 Mbit/s | Everyday use |
+| Sharp | 60 fps | ~18 Mbit/s | Lots of text, good Wi-Fi |
+| Ultra | 60 fps | ~36 Mbit/s | Strong Wi-Fi 6, or an iPad on Ethernet |
 
-Bitrates scale with the virtual monitor's resolution (e.g. Ultra at 1440p is about 60 Mbit/s). When a device is picked for sound, it may show **Tap to enable sound**, because browsers only play sound after a tap.
+Higher monitor resolutions use proportionally more data.
 
-**Controlling the PC from a device.** Nothing a device does reaches the PC until you allow it:
-1. On the device, tap with three fingers and press **Request control**. (It's only in that menu, so it can't happen by accident.)
-2. On the PC, a notification asks *Allow control of this PC?* with **Accept** / **Deny** (also in the tray). No answer in 30 seconds counts as Deny; after a Deny the device must wait 30 seconds to ask again.
-3. While it has control: **tap** to click, **hold** (half a second) to right-click, **drag one finger** to drag (windows, selections), **drag two fingers** to scroll. A **trackpad or mouse** (e.g. the iPad's Magic Keyboard) works like on a PC: the pointer follows it, clicks and two-finger clicks are left and right clicks, two-finger swipes scroll. A physically connected keyboard types on the PC; the iPad's **Cmd** key is the Super (Windows) key. There's no on-screen keyboard. Three-finger taps always open the menu and never reach the PC.
-4. Control ends when the device presses **Release control**, disconnects, or you pick **Revoke**, **Disconnect all**, **Restart** or **Stop**. Each device asks separately.
+**Request control:** see below.
 
-iPadOS keeps a few Cmd shortcuts for itself (Cmd+Tab, Cmd+Space, Cmd+H), so those don't reach the PC. Before control is granted, taps just go fullscreen as before.
+If you send sound to a device, it may show **Tap to enable sound**. Browsers only play sound after you've touched the page.
 
-**Running from a terminal** works too: `linaux-screen` (with any options below). Logs always go to `~/.local/state/linaux-screen/linaux-screen.log`.
+### Controlling the PC
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--source virtual\|monitor\|test` | `virtual` | New extended monitor, mirror an existing one, or a test pattern (no capture) |
-| `--encoder auto\|vaapi\|nvenc\|x264` | `auto` | H.264 encoder; `auto` tries VA-API, NVENC, then software |
-| `--bitrate <kbps>` | automatic | Video bitrate. Automatic picks it from the resolution: about 12000 at 1080p, 34000 at 4K |
-| `--port <n>` | `4444` | Port to serve on |
-| `--idle-timeout <secs>` | `60` | Stop this long after the last device leaves (`0` = never) |
-| `--no-tray` | off | No tray icon |
+Nothing a device does reaches the PC until you allow it.
 
-**Troubleshooting**
+1. On the device, open the three-finger menu and tap **Request control**.
+2. On the PC, a notification asks **Allow control of this PC?** Choose **Accept** or **Deny**; the same choice is in the tray. No answer within 30 seconds counts as Deny, and a denied device has to wait 30 seconds before asking again.
+3. Once accepted:
 
-- Check which GStreamer pieces you have: `gst-inspect-1.0 webrtcbin nicesrc pipewiresrc vah264enc nvh264enc x264enc`
-- If something fails, check `~/.local/state/linaux-screen/linaux-screen.log`, or run `RUST_LOG=debug GST_DEBUG=3 linaux-screen` in a terminal and attach the output to an issue.
-- If the network path is in doubt, `--source test` streams a moving test pattern with no screen capture involved.
-- Firewall: allow TCP 4444 and UDP (WebRTC picks random high ports), e.g. `sudo firewall-cmd --add-port=4444/tcp --add-port=1024-65535/udp` for a quick test.
+   | On the device | On the PC |
+   |---|---|
+   | Tap | Left click |
+   | Hold (½ second) | Right click |
+   | Drag one finger | Click and drag (move windows, select text) |
+   | Drag two fingers | Scroll |
+   | Trackpad or mouse | Works as normal: pointer, clicks, two-finger scroll |
+   | Keyboard | Types on the PC. The iPad's **Cmd** key is the Super (Windows) key |
+   | Three-finger tap | Opens the device menu; never sent to the PC |
 
-## Bazzite notes
+4. Control ends when the device taps **Release control** or disconnects, or when you choose **Revoke**, **Disconnect all**, **Restart** or **Stop** on the PC.
 
-- Bazzite is immutable: the app is a single binary in `~/.local/bin` plus an app-menu entry. No rpm-ostree layering needed (apart from the `nicesrc` plugin copy above).
-- Portals ask for consent on first run; the app stores the restore token so it won't ask every session.
+There's no on-screen keyboard; use a physical (e.g. Bluetooth) keyboard. iPadOS keeps a few shortcuts for itself (Cmd+Tab, Cmd+Space, Cmd+H).
+
+## Privacy and security
+
+- **It stays on your home network.** Nothing goes through the internet or any outside server, and the video itself is encrypted (WebRTC).
+- **Watching isn't password-protected.** While the app is running, anyone on the same network who opens the address can see the shared screen. The tray always lists who's connected, and **Disconnect all** sends them away. Use it on networks you trust.
+- **Control always needs your OK,** per device, every time it connects.
+- **It only runs when you start it,** and stops by itself when unused.
+
+## Troubleshooting
+
+- **The device can't connect.** Check it's on the same Wi-Fi as the PC, not a guest network, and use the exact address from the notification or the tray. If your PC's firewall blocks incoming connections, allow TCP port 4444 and UDP (the video uses random high ports). Bazzite's default setup works without changes.
+- **Black screen or very low frame rate.** Choose **Restart** in the tray. If it keeps happening, look at the log (below).
+- **No sound on the device.** Tap the device's screen once (browsers need a tap), and check the device isn't muted.
+- **KDE asks for permission every time.** If KDE's prompt offers to remember the choice, tick it. The app also saves the permission separately for each way you start it (app menu or terminal), so the first launch each way asks once.
+- **The log** is at `~/.local/state/linaux-screen/linaux-screen.log`. Please attach it if you [open an issue](https://github.com/janders1993/Linaux-Screen/issues).
+
+## Building from source and contributing
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for how it works inside, building from source, command-line options and the roadmap.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

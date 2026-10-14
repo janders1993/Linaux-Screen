@@ -1,6 +1,6 @@
 # Linaux Screen — notes for coding sessions
 
-Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet browser. Target machine: Bazzite. Plan and status: `README.md` and the GitHub issues (the roadmap in the README links them).
+Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet browser. Target machine: Bazzite. `README.md` is the user guide; `docs/DEVELOPMENT.md` has the architecture, build steps, flags and roadmap (linking the GitHub issues).
 
 ## Layout
 
