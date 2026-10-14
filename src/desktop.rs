@@ -6,7 +6,52 @@ use std::collections::HashMap;
 use zbus::zvariant::Value;
 
 pub const APP_NAME: &str = "Linaux Screen";
-pub const ICON: &str = "video-display";
+/// The app's icon names, installed by `install.sh` into the user's icon
+/// theme (see `assets/icons`).
+const APP_ICON: &str = "io.github.janders1993.LinauxScreen";
+const TRAY_ICON: &str = "io.github.janders1993.LinauxScreen-tray";
+const TRAY_ATTENTION_ICON: &str = "io.github.janders1993.LinauxScreen-tray-attention";
+/// KDE's generic icon, for a copy run without its icons installed.
+const FALLBACK_ICON: &str = "video-display";
+
+/// Whether `name` is installed in any icon theme folder we know of.
+fn icon_installed(name: &str) -> bool {
+    let mut dirs: Vec<std::path::PathBuf> = dirs::data_dir().into_iter().collect();
+    let system =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    dirs.extend(system.split(':').filter(|d| !d.is_empty()).map(Into::into));
+    dirs.iter().any(|d| {
+        d.join("icons/hicolor/scalable/apps")
+            .join(format!("{name}.svg"))
+            .exists()
+    })
+}
+
+fn icon_or_fallback(name: &'static str) -> &'static str {
+    if icon_installed(name) {
+        name
+    } else {
+        FALLBACK_ICON
+    }
+}
+
+/// The app icon (app menu, notifications).
+pub fn app_icon() -> &'static str {
+    static ICON: std::sync::OnceLock<&str> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| icon_or_fallback(APP_ICON))
+}
+
+/// The tray icon, and the one shown while a device is asking for control.
+pub fn tray_icons() -> (&'static str, &'static str) {
+    static ICONS: std::sync::OnceLock<(&str, &str)> = std::sync::OnceLock::new();
+    *ICONS.get_or_init(|| {
+        if icon_installed(TRAY_ICON) {
+            (TRAY_ICON, icon_or_fallback(TRAY_ATTENTION_ICON))
+        } else {
+            (FALLBACK_ICON, FALLBACK_ICON)
+        }
+    })
+}
 
 /// Shows a desktop notification.
 pub async fn notify(summary: &str, body: &str) {
@@ -26,7 +71,7 @@ async fn try_notify(summary: &str, body: &str) -> zbus::Result<()> {
         &(
             APP_NAME,
             0u32,
-            ICON,
+            app_icon(),
             summary,
             body,
             Vec::<&str>::new(),
@@ -84,7 +129,7 @@ async fn try_ask(
     let id: u32 = proxy
         .call(
             "Notify",
-            &(APP_NAME, 0u32, ICON, summary, body, flat, hints, 0i32),
+            &(APP_NAME, 0u32, app_icon(), summary, body, flat, hints, 0i32),
         )
         .await?;
     loop {

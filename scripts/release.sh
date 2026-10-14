@@ -52,6 +52,7 @@ say "Packing $NAME.tar.gz…"
 rm -rf "dist/$NAME" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256"
 mkdir -p "dist/$NAME/gstreamer-plugins"
 cp target/release/linaux-screen scripts/install.sh README.md LICENSE "dist/$NAME/"
+cp -r assets/icons "dist/$NAME/icons"
 cp "$NICE" "dist/$NAME/gstreamer-plugins/libgstnice.so"
 cat > "dist/$NAME/gstreamer-plugins/README.txt" <<TXT
 libgstnice.so is GStreamer's nicesrc/nicesink plugin from libnice
