@@ -1,6 +1,6 @@
 [package]
 name = "linaux-screen"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
 description = "Turn a phone or tablet into a second monitor for KDE Plasma over the browser"
