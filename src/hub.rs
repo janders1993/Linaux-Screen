@@ -18,8 +18,7 @@ use crate::pipeline::{self, Source};
 /// capture on its own ran at 30-75 fps. It also means a viewer joining while
 /// the screen is idle immediately gets the last frame.
 pub struct CaptureHub {
-    desc: String,
-    pipeline: Mutex<gst::Pipeline>,
+    pipeline: gst::Pipeline,
     shared: Arc<Shared>,
 }
 
@@ -107,8 +106,8 @@ fn push(appsrc: &gst_app::AppSrc, sample: &gst::Sample) {
 }
 
 impl CaptureHub {
-    pub fn start(source: &Source, fps: u32, dmabuf: bool) -> Result<Self> {
-        let (src, convert) = pipeline::capture_desc(source, fps, dmabuf);
+    pub fn start(source: &Source, fps: u32) -> Result<Self> {
+        let (src, convert) = pipeline::capture_desc(source, fps);
         let desc = format!(
             "{src} \
              ! queue max-size-buffers=1 leaky=downstream \
@@ -127,33 +126,19 @@ impl CaptureHub {
             .name("linaux-catch-up".into())
             .spawn(move || run_catch_up(weak))
             .context("couldn't start the frame catch-up thread")?;
-        let pipeline = Self::build(&desc, &shared, None)?;
-        Ok(Self {
-            desc,
-            pipeline: Mutex::new(pipeline),
-            shared,
-        })
-    }
 
-    fn build(
-        desc: &str,
-        shared: &Arc<Shared>,
-        test_caps: Option<gst::Caps>,
-    ) -> Result<gst::Pipeline> {
-        let pipeline = pipeline::parse(desc)?;
-        if let (Some(caps), Some(filter)) = (test_caps, pipeline.by_name("testcaps")) {
-            filter.set_property("caps", caps);
-        }
+        let pipeline = pipeline::parse(&desc)?;
         let sink = pipeline
             .by_name("sink")
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .context("appsink missing from capture pipeline")?;
 
-        let shared = shared.clone();
+        let callback_shared = shared.clone();
         sink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    let shared = &callback_shared;
                     // Store it first, so an owed frame sent by the catch-up
                     // thread is never older than this one.
                     *shared.last.lock().unwrap() = Some(sample.clone());
@@ -172,23 +157,7 @@ impl CaptureHub {
         pipeline
             .set_state(gst::State::Playing)
             .context("capture pipeline refused to start — run with RUST_LOG=debug GST_DEBUG=3")?;
-        Ok(pipeline)
-    }
-
-    /// Reconnects to the screen. After KDE resizes the monitor, the existing
-    /// PipeWire connection keeps delivering frames at the old size (with the
-    /// new-size desktop cropped or padded inside them); a fresh connection
-    /// negotiates the new size. Viewers stay subscribed throughout.
-    pub fn restart(&self) -> Result<()> {
-        let mut pipeline = self.pipeline.lock().unwrap();
-        // Test pattern: carry its current size over to the new pipeline.
-        let test_caps = pipeline
-            .by_name("testcaps")
-            .map(|f| f.property::<gst::Caps>("caps"));
-        let _ = pipeline.set_state(gst::State::Null);
-        *pipeline = Self::build(&self.desc, &self.shared, test_caps)?;
-        tracing::info!("capture reconnected");
-        Ok(())
+        Ok(Self { pipeline, shared })
     }
 
     /// Starts feeding frames to `appsrc`; returns an id for `unsubscribe`.
@@ -238,25 +207,10 @@ impl CaptureHub {
             s.get::<i32>("height").ok()? as u32,
         ))
     }
-
-    /// Test pattern only: change the frame size, as if the monitor resized.
-    /// Returns false if this isn't the test source.
-    pub fn resize_test_pattern(&self, width: u32, height: u32) -> bool {
-        let Some(filter) = self.pipeline.lock().unwrap().by_name("testcaps") else {
-            return false;
-        };
-        let caps = gst::Caps::builder("video/x-raw")
-            .field("width", width as i32)
-            .field("height", height as i32)
-            .field("framerate", gst::Fraction::new(60, 1))
-            .build();
-        filter.set_property("caps", caps);
-        true
-    }
 }
 
 impl Drop for CaptureHub {
     fn drop(&mut self) {
-        let _ = self.pipeline.lock().unwrap().set_state(gst::State::Null);
+        let _ = self.pipeline.set_state(gst::State::Null);
     }
 }

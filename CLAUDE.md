@@ -14,9 +14,8 @@ Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet
 - `src/hub.rs` — `CaptureHub`: one long-running capture pipeline (pipewiresrc → NV12 → appsink) started at launch, pushing frames to every subscribed viewer; optional per-viewer fps cap, with a catch-up thread that sends a skipped frame once due, so a still screen is never stale
 - `src/quality.rs` — per-device presets (Battery saver / Smooth / Sharp / Ultra): fps cap + bitrate multiplier, applied live via `Session::set_quality` (encoder is named `enc`). No memory: each connection starts on Smooth
 - `src/session.rs` — `Signal` (WebSocket messages) and `Session`: one viewer's pipeline (appsrc → H.264 → rtph264pay → webrtcbin)
-- `src/display.rs` — (opt-in via `--fit-device`, experimental: killed fps on KDE+NVIDIA) resizes the virtual monitor to the viewer's screen via `kscreen-doctor` (finds our output by diffing outputs before/after the portal starts; adds a custom mode, sets mode + scale)
 - `src/audio.rs` — sound to one chosen device: a `linaux-screen` null sink owned by a `pw-cli` child (PR_SET_PDEATHSIG, so it vanishes if the app dies), set as default via `pactl` (previous default saved in ~/.local/state for crash recovery), captured with `pulsesrc` → `AudioRouter` → the chosen viewer's `asrc`. Ignored tests exercise it against a real PipeWire; they share it, so run them one at a time: `cargo test -- --ignored --test-threads=1`.
-- `src/server.rs` — axum: `/` serves the viewer, `/ws` does signalling; up to `MAX_VIEWERS` (4) devices all mirror the same screen, each with its own encode; sends the device count on change; sends `bye` (disconnected / stopped / full) so viewers don't auto-retry; with `--fit-device` only the first device steers the size
+- `src/server.rs` — axum: `/` serves the viewer, `/ws` does signalling; up to `MAX_VIEWERS` (4) devices all mirror the same screen, each with its own encode; sends the device count on change; sends `bye` (disconnected / stopped / full) so viewers don't auto-retry
 - `web/index.html` — the viewer, embedded into the binary with `include_str!`
 
 ## Conventions
@@ -27,11 +26,12 @@ Spacedesk-style second screen for KDE Plasma (Wayland), viewed in a phone/tablet
 
 - Server is always the WebRTC offerer; the browser answers. It offers once: size changes travel in-band in H.264 (a re-offer crashed webrtcbin 1.24 with the audio track).
 - Input: nothing from a device reaches the PC until the PC accepts it. The server checks `has_control` on every input message (the viewer also sends nothing before approval). Request control lives only in the three-finger menu. No on-screen keyboard.
+- Removed on purpose (in git history): `--fit-device` (resizing the virtual monitor to each device via `kscreen-doctor`; killed fps on KDE + NVIDIA, manual Display settings won) and `--dmabuf` (GL capture path, ~20 fps vs ~55 on NVIDIA).
 - Encoder/element properties go through `element_desc()`, which drops properties or enum values the installed GStreamer doesn't support, so one unknown property can't break the pipeline.
 - Keep the viewer a single dependency-free HTML file.
 
 ## Testing without a Plasma desktop
 
-`cargo run -- --source test --encoder x264` streams a test pattern with no portal involved. In test mode, viewer `display` messages resize the test pattern, exercising the same size-change path as a real monitor resize, and accepted input is logged (`test input: …`) instead of sent. Control requests still go through the notification; without a notification server they time out to Deny after 30 s (or accept from the tray). A headless client (e.g. aiortc) can verify the WebRTC path; note aiortc only offers ECDSA DTLS ciphers, so widen its cipher list to include `ECDHE-RSA-*` to match browsers.
+`cargo run -- --source test --encoder x264` streams a test pattern with no portal involved. In test mode, accepted input is logged (`test input: …`) instead of sent. Control requests still go through the notification; without a notification server they time out to Deny after 30 s (or accept from the tray). A headless client (e.g. aiortc) can verify the WebRTC path; note aiortc only offers ECDSA DTLS ciphers, so widen its cipher list to include `ECDHE-RSA-*` to match browsers.
 
 Build deps (Debian/Ubuntu): `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libdbus-1-dev`; runtime: `gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-nice gstreamer1.0-plugins-ugly`.

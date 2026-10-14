@@ -17,7 +17,6 @@ use tokio::sync::mpsc;
 
 use crate::audio::AudioRouter;
 use crate::control::{Control, Request, MAX_VIEWERS};
-use crate::display::{self, VirtualDisplay};
 use crate::hub::CaptureHub;
 use crate::input::{self, DeviceInput, InputSink};
 use crate::pipeline::EncoderChoice;
@@ -44,7 +43,6 @@ struct AppState {
     audio: Arc<AudioRouter>,
     encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
-    display: Option<Arc<VirtualDisplay>>,
     input: Option<InputSink>,
 }
 
@@ -54,7 +52,6 @@ pub async fn run(
     audio: Arc<AudioRouter>,
     encoder: EncoderChoice,
     hub: Arc<CaptureHub>,
-    display: Option<Arc<VirtualDisplay>>,
     input: Option<InputSink>,
 ) -> Result<()> {
     let state = Arc::new(AppState {
@@ -62,7 +59,6 @@ pub async fn run(
         audio,
         encoder,
         hub,
-        display,
         input,
     });
 
@@ -218,13 +214,6 @@ async fn handle_viewer(socket: WebSocket, peer: SocketAddr, state: Arc<AppState>
             }
             incoming = ws_rx.next() => match incoming {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<Signal>(&text) {
-                    Ok(Signal::Display { width, height, dpr }) => {
-                        // Only the first device steers the size, so two
-                        // devices don't fight over it.
-                        if state.control.is_first_viewer(peer) {
-                            resize_for(&state, peer, width, height, dpr);
-                        }
-                    }
                     Ok(Signal::Quality { preset, .. }) => {
                         // Only this device's own stream; no PC approval needed.
                         let Some(preset) = Preset::parse(&preset) else { continue };
@@ -320,40 +309,4 @@ async fn say_bye(ws_tx: &mut SplitSink<WebSocket, Message>, reason: &str) {
         let _ = ws_tx.send(Message::Text(text.into())).await;
     }
     let _ = ws_tx.send(Message::Close(None)).await;
-}
-
-/// With `--fit-device`, resizes the virtual monitor to suit the viewer's
-/// screen, in the background. In test mode it resizes the test pattern.
-fn resize_for(state: &AppState, peer: SocketAddr, width: u32, height: u32, dpr: f64) {
-    let (w, h, scale) = display::plan(width, height, dpr);
-    tracing::debug!("{peer} screen is {width}x{height} @{dpr}x");
-    let Some(display) = state.display.clone() else {
-        if state.hub.resize_test_pattern(w, h) {
-            tracing::info!("test pattern resized to {w}x{h}");
-            // Reconnect like the real monitor does, so tests cover it.
-            let hub = state.hub.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = hub.restart() {
-                    tracing::error!("couldn't reconnect capture after resize: {e:#}");
-                }
-            });
-        }
-        return;
-    };
-    let hub = state.hub.clone();
-    tokio::spawn(async move {
-        match display.apply(w, h, scale).await {
-            Ok(true) => {
-                // Give KWin a moment to finish the mode change, then reconnect
-                // so the capture picks up the new size.
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                let result = tokio::task::spawn_blocking(move || hub.restart()).await;
-                if let Ok(Err(e)) = result {
-                    tracing::error!("couldn't reconnect capture after resize: {e:#}");
-                }
-            }
-            Ok(false) => {}
-            Err(e) => tracing::warn!("couldn't resize the virtual monitor: {e:#}"),
-        }
-    });
 }
