@@ -18,6 +18,7 @@ BOX="${LINAUX_BOX:-linaux}"
 BIN_DIR="$HOME/.local/bin"
 APPS_DIR="$HOME/.local/share/applications"
 PLUGIN_DIR="$HOME/.local/share/gstreamer-1.0/plugins"
+ICON_DIR="$HOME/.local/share/icons"
 BIN="$BIN_DIR/linaux-screen"
 DESKTOP="$APPS_DIR/$APP_ID.desktop"
 
@@ -27,6 +28,7 @@ warn() { printf '\033[33m! %s\033[0m\n' "$*"; }
 if [[ "${1:-}" == "--uninstall" ]]; then
     pkill -x linaux-screen 2>/dev/null || true
     rm -f "$BIN" "$DESKTOP"
+    find "$ICON_DIR/hicolor" -name "$APP_ID*.svg" -delete 2>/dev/null || true
     update-desktop-database "$APPS_DIR" 2>/dev/null || true
     say "Removed. (Settings and logs are left in ~/.config/linaux-screen and ~/.local/state/linaux-screen.)"
     exit 0
@@ -40,6 +42,7 @@ fi
 # A release download has the app right here; a source checkout builds it.
 if [[ -x "$HERE/linaux-screen" ]]; then
     BUILT="$HERE/linaux-screen"
+    ICONS="$HERE/icons"
 else
     REPO="$(cd "$HERE/.." && pwd)"
     if [[ "${1:-}" != "--no-build" ]]; then
@@ -47,6 +50,7 @@ else
         distrobox enter "$BOX" -- bash -lc "cd '$REPO' && source ~/.cargo/env && cargo build --release"
     fi
     BUILT="$REPO/target/release/linaux-screen"
+    ICONS="$REPO/assets/icons"
     if [[ ! -x "$BUILT" ]]; then
         echo "No build found at $BUILT. Build it first (see docs/DEVELOPMENT.md)." >&2
         exit 1
@@ -93,6 +97,13 @@ mkdir -p "$BIN_DIR" "$APPS_DIR"
 cp "$BUILT" "$BIN.new"
 mv -f "$BIN.new" "$BIN"
 
+# App and tray icons, into your own icon theme folder.
+if [[ -d "$ICONS/hicolor" ]]; then
+    mkdir -p "$ICON_DIR"
+    cp -r "$ICONS/hicolor" "$ICON_DIR/"
+    touch "$ICON_DIR/hicolor"
+fi
+
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
@@ -100,7 +111,7 @@ Name=Linaux Screen
 GenericName=Second screen
 Comment=Use a phone or tablet as a second monitor
 Exec=$BIN
-Icon=video-display
+Icon=$APP_ID
 Terminal=false
 Categories=Utility;
 Keywords=spacedesk;monitor;display;second screen;tablet;phone;

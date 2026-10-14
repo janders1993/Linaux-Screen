@@ -145,7 +145,11 @@ impl ksni::Tray for ScreenTray {
     }
 
     fn icon_name(&self) -> String {
-        desktop::ICON.into()
+        desktop::tray_icons().0.into()
+    }
+
+    fn attention_icon_name(&self) -> String {
+        desktop::tray_icons().1.into()
     }
 
     fn status(&self) -> ksni::Status {

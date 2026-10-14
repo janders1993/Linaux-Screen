@@ -24,6 +24,18 @@ use crate::quality::Preset;
 use crate::session::{Session, Signal};
 
 const VIEWER_HTML: &str = include_str!("../web/index.html");
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../assets/web/apple-touch-icon.png");
+const ICON_192: &[u8] = include_bytes!("../assets/web/icon-192.png");
+
+fn png(bytes: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (axum::http::header::CACHE_CONTROL, "max-age=86400"),
+        ],
+        bytes,
+    )
+}
 
 /// A short fingerprint of the viewer page. Pages stay open across app
 /// restarts and reconnect by themselves, so a page from an older build would
@@ -74,6 +86,12 @@ pub async fn run(
                 )
             }),
         )
+        // Icons for the browser tab and a home-screen bookmark.
+        .route(
+            "/apple-touch-icon.png",
+            get(|| async { png(APPLE_TOUCH_ICON) }),
+        )
+        .route("/icon-192.png", get(|| async { png(ICON_192) }))
         .route("/ws", get(ws_handler))
         .with_state(state);
 

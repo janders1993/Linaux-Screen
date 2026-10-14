@@ -99,7 +99,7 @@ Run `linaux-screen` from a terminal to use these. Logs always go to `~/.local/st
 1. Bump `version` in `Cargo.toml` and write the notes in `docs/releases/v<version>.md`. Merge both to main.
 2. Inside the `linaux` box, on an up-to-date main, run `scripts/release.sh`. It:
    1. builds the release binary;
-   2. packs `dist/linaux-screen-<version>-x86_64.tar.gz`: the app, `install.sh`, the README, the licence, and GStreamer's `nicesrc` plugin for systems that lack it;
+   2. packs `dist/linaux-screen-<version>-x86_64.tar.gz`: the app, `install.sh`, the icons, the README, the licence, and GStreamer's `nicesrc` plugin for systems that lack it;
    3. creates a **draft** GitHub release with the download attached.
 
    `scripts/release.sh --no-upload` only builds and packs.
